@@ -48,6 +48,8 @@ python -m pip install -r requirements.txt
 - `SUPABASE_URL`、`SUPABASE_KEY`：登录用（项目依赖 Supabase）
 - `FEISHU_WEBHOOK_URL`（可选）：飞书推送地址
 
+> Tushare 注册推荐：可通过 [此链接注册](https://tushare.pro/weborder/#/login?reg=955650)，双方可一起提升获取更高级股票数据的权益。
+
 ### 3. 运行
 
 **Web 界面（推荐）**：浏览器里查数据、下 CSV。
