@@ -33,6 +33,8 @@ from core.wyckoff_engine import (
 )
 from integrations.data_source import fetch_index_hist, fetch_sector_map, fetch_market_cap_map
 from core.single_stock_logic import render_single_stock_page
+from scripts.step3_batch_report import generate_stock_payload
+from integrations.ai_prompts import WYCKOFF_FUNNEL_SYSTEM_PROMPT
 
 # 等待时随机展示的股市名人名言（本地列表）
 STOCK_QUOTES = [
@@ -241,20 +243,69 @@ with content_col:
         parts: list[str] = []
 
         try:
-            for symbol in symbols:
-                try:
-                    df_hist = _fetch_hist(symbol, window, ADJUST)
-                    sector = stock_sector_em(symbol, timeout=30)
-                    df_export = _build_export(df_hist, sector)
+            if analysis_type == "find_gold":
+                # 使用和 step3_batch_report.py 完全一致的格式
+                # funnel_result 已经存在了 session 里 (code, score)
+                # find_gold 已经提取出了 symbols 列表
+                # 取出 tag 和 score
+                # 由于之前的 funnel 没有把完整的 row 存到 session，我们在这动态生成。
+                fg_list = st.session_state.get("ai_find_gold_result") or []
+                score_map = {code: score for code, score in fg_list}
+                
+                parts: list[str] = []
+                for symbol in symbols:
                     try:
-                        name = _stock_name_from_code(symbol)
-                    except Exception:
-                        name = symbol
-                    csv_text = df_export.to_csv(index=False, encoding="utf-8-sig")
-                    parts.append(f"## {symbol} {name}\n\n```csv\n{csv_text}\n```")
-                except Exception as e:
-                    failed.append(f"{symbol}（{e}）")
-                    continue
+                        df_hist = _fetch_hist(symbol, window, ADJUST)
+                        df = normalize_hist_from_fetch(df_hist)
+                        sector = stock_sector_em(symbol, timeout=30)
+                        try:
+                            name = _stock_name_from_code(symbol)
+                        except Exception:
+                            name = symbol
+
+                        score = score_map.get(symbol)
+                        # 生成统一的高密度盘口切片文本
+                        payload = generate_stock_payload(
+                            stock_code=symbol,
+                            stock_name=name,
+                            wyckoff_tag="AI分析", # 网页端简化
+                            df=df,
+                            industry=sector,
+                            quant_score=score,
+                        )
+                        parts.append(payload)
+                    except Exception as e:
+                        failed.append(f"{symbol}（{e}）")
+                        continue
+
+                system_prompt_to_use = WYCKOFF_FUNNEL_SYSTEM_PROMPT
+                user_message = (
+                    "请按最新的《Alpha 投委会机密电报》流程，使用综合人视角，对以下票池进行诊断与分流。\n\n"
+                    + "\n\n".join(parts)
+                )
+
+            else:
+                # 兼容旧单股 / stock_list 模式
+                for symbol in symbols:
+                    try:
+                        df_hist = _fetch_hist(symbol, window, ADJUST)
+                        sector = stock_sector_em(symbol, timeout=30)
+                        df_export = _build_export(df_hist, sector)
+                        try:
+                            name = _stock_name_from_code(symbol)
+                        except Exception:
+                            name = symbol
+                        csv_text = df_export.to_csv(index=False, encoding="utf-8-sig")
+                        parts.append(f"## {symbol} {name}\n\n```csv\n{csv_text}\n```")
+                    except Exception as e:
+                        failed.append(f"{symbol}（{e}）")
+                        continue
+
+                system_prompt_to_use = ALPHA_CIO_SYSTEM_PROMPT
+                user_message = (
+                    "请按 Alpha 投委会流程分析以下 OHLCV 数据（CSV 格式）。\n\n"
+                    + "\n\n".join(parts)
+                )
 
             if not parts:
                 st.error("所有标的拉取失败，无法进行分析。失败详情：" + "; ".join(failed))
@@ -264,16 +315,11 @@ with content_col:
             if failed:
                 st.caption("以下标的拉取失败，已跳过：" + "; ".join(failed))
 
-            user_message = (
-                "请按 Alpha 投委会流程分析以下 OHLCV 数据（CSV 格式）。\n\n"
-                + "\n\n".join(parts)
-            )
-
             report_text = call_llm(
                 provider=provider,
                 model=model,
                 api_key=api_key,
-                system_prompt=ALPHA_CIO_SYSTEM_PROMPT,
+                system_prompt=system_prompt_to_use,
                 user_message=user_message,
                 timeout=120,
             )

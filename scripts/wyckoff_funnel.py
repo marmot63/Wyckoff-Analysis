@@ -67,7 +67,7 @@ BATCH_SLEEP = float(os.getenv("FUNNEL_BATCH_SLEEP", "2"))
 MAX_WORKERS = int(os.getenv("FUNNEL_MAX_WORKERS", "8"))
 EXECUTOR_MODE = os.getenv("FUNNEL_EXECUTOR_MODE", "process").strip().lower()
 if EXECUTOR_MODE not in {"thread", "process"}:
-    EXECUTOR_MODE = "thread"
+    EXECUTOR_MODE = "process"
 ENFORCE_TARGET_TRADE_DATE = False
 FUNNEL_ENABLE_SPOT_PATCH = os.getenv("FUNNEL_ENABLE_SPOT_PATCH", "1").strip().lower() in {
     "1",
@@ -83,10 +83,27 @@ BREADTH_RISK_ON_THRESHOLD = float(os.getenv("FUNNEL_BREADTH_RISK_ON_PCT", "60.0"
 BREADTH_RISK_ON_MIN_DELTA = float(os.getenv("FUNNEL_BREADTH_RISK_ON_DELTA", "0.0"))
 BREADTH_CLIFF_DROP_PCT = float(os.getenv("FUNNEL_BREADTH_CLIFF_DROP_PCT", "-10.0"))
 SMALLCAP_BENCH_CODE = os.getenv("FUNNEL_SMALLCAP_BENCH_CODE", "399006").strip() or "399006"
-CRASH_MAIN_DAY_DROP_PCT = float(os.getenv("FUNNEL_CRASH_MAIN_DAY_DROP_PCT", "-1.5"))
-CRASH_SMALL_DAY_DROP_PCT = float(os.getenv("FUNNEL_CRASH_SMALL_DAY_DROP_PCT", "-3.0"))
+CRASH_MAIN_DAY_DROP_PCT = float(os.getenv("FUNNEL_CRASH_MAIN_DAY_DROP_PCT", "-1.3"))
+CRASH_SMALL_DAY_DROP_PCT = float(os.getenv("FUNNEL_CRASH_SMALL_DAY_DROP_PCT", "-2.5"))
 CRASH_BREADTH_RATIO_PCT = float(os.getenv("FUNNEL_CRASH_BREADTH_RATIO_PCT", "15.0"))
 CRASH_BREADTH_DELTA_PCT = float(os.getenv("FUNNEL_CRASH_BREADTH_DELTA_PCT", "-20.0"))
+CRASH_EXTREME_DROP_PCT = float(os.getenv("FUNNEL_CRASH_EXTREME_DROP_PCT", "-9.0"))
+CRASH_EXTREME_DROP_COUNT = int(os.getenv("FUNNEL_CRASH_EXTREME_DROP_COUNT", "50"))
+PANIC_REPAIR_ENABLE = os.getenv("FUNNEL_PANIC_REPAIR_ENABLE", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+PANIC_REPAIR_MAIN_REBOUND_PCT = float(
+    os.getenv("FUNNEL_PANIC_REPAIR_MAIN_REBOUND_PCT", "0.8")
+)
+PANIC_REPAIR_SMALL_REBOUND_PCT = float(
+    os.getenv("FUNNEL_PANIC_REPAIR_SMALL_REBOUND_PCT", "1.5")
+)
+PANIC_REPAIR_MAX_EXTREME_COUNT = int(
+    os.getenv("FUNNEL_PANIC_REPAIR_MAX_EXTREME_COUNT", "20")
+)
 FUNNEL_EXPORT_FULL_FETCH = os.getenv("FUNNEL_EXPORT_FULL_FETCH", "0").strip().lower() in {
     "1",
     "true",
@@ -312,6 +329,7 @@ def _analyze_benchmark_and_tune_cfg(
     smallcap_df: pd.DataFrame | None,
     cfg: FunnelConfig,
     breadth: dict | None = None,
+    panic_snapshot: dict | None = None,
 ) -> dict:
     """
     Step 0：大盘总闸
@@ -334,6 +352,16 @@ def _analyze_benchmark_and_tune_cfg(
         "smallcap_today_pct": None,
         "panic_triggered": False,
         "panic_reasons": [],
+        "repair_triggered": False,
+        "repair_reasons": [],
+        "panic_snapshot": {
+            "ok": False,
+            "total": 0,
+            "down_extreme_count": 0,
+            "down_9_count": 0,
+            "down_10_count": 0,
+            "up_9_count": 0,
+        },
         "tuned": {
             "min_avg_amount_wan": cfg.min_avg_amount_wan,
             "rs_min_long": cfg.rs_min_long,
@@ -356,10 +384,12 @@ def _analyze_benchmark_and_tune_cfg(
     recent3_list: list[float] = []
     recent3_cum = None
     main_today_pct = None
+    main_prev_pct = None
     small_close = None
     small_recent3_list: list[float] = []
     small_recent3_cum = None
     small_today_pct = None
+    small_prev_pct = None
 
     if bench_df is not None and not bench_df.empty:
         b = bench_df.sort_values("date").copy()
@@ -377,6 +407,8 @@ def _analyze_benchmark_and_tune_cfg(
                 recent3_cum = float(((recent3 / 100.0 + 1.0).prod() - 1.0) * 100.0)
             if recent3_list:
                 main_today_pct = float(recent3_list[-1])
+                if len(recent3_list) >= 2:
+                    main_prev_pct = float(recent3_list[-2])
 
     if smallcap_df is not None and not smallcap_df.empty:
         s = smallcap_df.sort_values("date").copy()
@@ -392,6 +424,8 @@ def _analyze_benchmark_and_tune_cfg(
                 )
             if small_recent3_list:
                 small_today_pct = float(small_recent3_list[-1])
+                if len(small_recent3_list) >= 2:
+                    small_prev_pct = float(small_recent3_list[-2])
 
     regime = "NEUTRAL"
     if (
@@ -452,9 +486,51 @@ def _analyze_benchmark_and_tune_cfg(
         panic_reasons.append(
             f"breadth_delta={float(breadth_delta):.2f}%<=阈值{CRASH_BREADTH_DELTA_PCT:.2f}%"
         )
+    snap = panic_snapshot or {}
+    snap_ok = bool(snap.get("ok"))
+    snap_down_extreme = int(snap.get("down_extreme_count") or 0)
+    snap_down_9 = int(snap.get("down_9_count") or 0)
+    if (
+        snap_ok
+        and CRASH_EXTREME_DROP_COUNT > 0
+        and snap_down_extreme >= CRASH_EXTREME_DROP_COUNT
+    ):
+        panic_reasons.append(
+            f"down_{CRASH_EXTREME_DROP_PCT:g}_count={snap_down_extreme}>=阈值{CRASH_EXTREME_DROP_COUNT}"
+        )
 
+    repair_reasons: list[str] = []
     if panic_reasons:
         regime = "CRASH"
+    elif PANIC_REPAIR_ENABLE:
+        prev_panic = (
+            (main_prev_pct is not None and float(main_prev_pct) <= float(CRASH_MAIN_DAY_DROP_PCT))
+            or (
+                small_prev_pct is not None
+                and float(small_prev_pct) <= float(CRASH_SMALL_DAY_DROP_PCT)
+            )
+        )
+        rebound_ok = (
+            (main_today_pct is not None and float(main_today_pct) >= float(PANIC_REPAIR_MAIN_REBOUND_PCT))
+            or (
+                small_today_pct is not None
+                and float(small_today_pct) >= float(PANIC_REPAIR_SMALL_REBOUND_PCT)
+            )
+        )
+        extreme_ok = (not snap_ok) or (
+            snap_down_extreme <= max(PANIC_REPAIR_MAX_EXTREME_COUNT, 0)
+        )
+        if prev_panic and rebound_ok and extreme_ok:
+            regime = "PANIC_REPAIR"
+            repair_reasons = [
+                f"prev_panic(main_prev={main_prev_pct}, small_prev={small_prev_pct})",
+                f"rebound_ok(main_today={main_today_pct}, small_today={small_today_pct})",
+                (
+                    f"down_{CRASH_EXTREME_DROP_PCT:g}_count={snap_down_extreme}<=阈值{PANIC_REPAIR_MAX_EXTREME_COUNT}"
+                    if snap_ok
+                    else "snapshot_unavailable"
+                ),
+            ]
 
     # 动态调参：风险越冷，过滤越严
     if regime == "CRASH":
@@ -463,6 +539,12 @@ def _analyze_benchmark_and_tune_cfg(
         cfg.rs_min_short = max(cfg.rs_min_short, 1.0)
         cfg.rps_fast_min = max(cfg.rps_fast_min, 90.0)
         cfg.rps_slow_min = max(cfg.rps_slow_min, 85.0)
+    elif regime == "PANIC_REPAIR":
+        cfg.min_avg_amount_wan = max(cfg.min_avg_amount_wan, 8000.0)
+        cfg.rs_min_long = max(cfg.rs_min_long, 1.0)
+        cfg.rs_min_short = max(cfg.rs_min_short, 0.2)
+        cfg.rps_fast_min = max(cfg.rps_fast_min, 75.0)
+        cfg.rps_slow_min = max(cfg.rps_slow_min, 65.0)
     elif regime == "RISK_OFF":
         cfg.min_avg_amount_wan = max(cfg.min_avg_amount_wan, 10000.0)
         cfg.rs_min_long = max(cfg.rs_min_long, 2.0)
@@ -495,6 +577,16 @@ def _analyze_benchmark_and_tune_cfg(
             "smallcap_today_pct": small_today_pct,
             "panic_triggered": bool(panic_reasons),
             "panic_reasons": panic_reasons,
+            "repair_triggered": bool(repair_reasons),
+            "repair_reasons": repair_reasons,
+            "panic_snapshot": {
+                "ok": snap_ok,
+                "total": int(snap.get("total") or 0),
+                "down_extreme_count": snap_down_extreme,
+                "down_9_count": snap_down_9,
+                "down_10_count": int(snap.get("down_10_count") or 0),
+                "up_9_count": int(snap.get("up_9_count") or 0),
+            },
             "tuned": {
                 "min_avg_amount_wan": cfg.min_avg_amount_wan,
                 "rs_min_long": cfg.rs_min_long,
@@ -562,6 +654,43 @@ def _calc_market_breadth(
         "delta_pct": delta,
         "sample_size": valid_now,
     }
+
+
+def _fetch_market_extreme_snapshot() -> dict:
+    """
+    快照级市场恐慌探针（不依赖全量日线拉取完成）：
+    - down_extreme_count: 涨跌幅 <= CRASH_EXTREME_DROP_PCT 数量
+    - down_9_count: 涨跌幅 <= -9.0% 数量
+    - down_10_count: 涨跌幅 <= -10.0% 数量
+    - up_9_count: 涨跌幅 >= 9.0% 数量
+    """
+    out = {
+        "ok": False,
+        "total": 0,
+        "down_extreme_count": 0,
+        "down_9_count": 0,
+        "down_10_count": 0,
+        "up_9_count": 0,
+    }
+    try:
+        import akshare as ak
+
+        df = ak.stock_zh_a_spot_em()
+        if df is None or df.empty:
+            return out
+        pct = pd.to_numeric(df.get("涨跌幅"), errors="coerce")
+        if pct is None or pct.dropna().empty:
+            return out
+        out["ok"] = True
+        out["total"] = int(pct.dropna().shape[0])
+        out["down_extreme_count"] = int((pct <= CRASH_EXTREME_DROP_PCT).sum())
+        out["down_9_count"] = int((pct <= -9.0).sum())
+        out["down_10_count"] = int((pct <= -10.0).sum())
+        out["up_9_count"] = int((pct >= 9.0).sum())
+        return out
+    except Exception as e:
+        print(f"[funnel] 市场极端快照获取失败: {e}")
+        return out
 
 
 def _dump_full_fetch_snapshot(
@@ -853,6 +982,18 @@ def run_funnel_job() -> tuple[dict[str, list[tuple[str, float]]], dict]:
         print(f"[funnel] 小盘基准加载成功: {SMALLCAP_BENCH_CODE}")
     except Exception as e:
         print(f"[funnel] 小盘基准加载失败 {SMALLCAP_BENCH_CODE}: {e}")
+    panic_snapshot = _fetch_market_extreme_snapshot()
+    if panic_snapshot.get("ok"):
+        print(
+            "[funnel] 市场极端快照: "
+            f"total={panic_snapshot.get('total')}, "
+            f"down_extreme({CRASH_EXTREME_DROP_PCT:g})={panic_snapshot.get('down_extreme_count')}, "
+            f"down_9={panic_snapshot.get('down_9_count')}, "
+            f"down_10={panic_snapshot.get('down_10_count')}, "
+            f"up_9={panic_snapshot.get('up_9_count')}"
+        )
+    else:
+        print("[funnel] 市场极端快照: unavailable")
 
     # 并发拉取日线（只负责取数，不负责计算）
     all_df_map: dict[str, pd.DataFrame] = {}
@@ -866,14 +1007,6 @@ def run_funnel_job() -> tuple[dict[str, list[tuple[str, float]]], dict]:
         f"(executor={EXECUTOR_MODE}, batch_size={BATCH_SIZE}, max_workers={MAX_WORKERS}, batch_timeout={BATCH_TIMEOUT}s, "
         f"fetch_timeout={FETCH_TIMEOUT}s, retries={MAX_RETRIES})"
     )
-    _baostock_orig = os.environ.get("DATA_SOURCE_DISABLE_BAOSTOCK")
-    if EXECUTOR_MODE == "process":
-        if not _baostock_orig:
-            os.environ["DATA_SOURCE_DISABLE_BAOSTOCK"] = "1"
-            print(
-                "[funnel] 检测到 process 并发，已自动设置 DATA_SOURCE_DISABLE_BAOSTOCK=1 "
-                "以规避并发 login 风险（任务结束后自动还原）。"
-            )
     total_fetch_started = time.monotonic()
     for i in range(0, len(all_symbols), BATCH_SIZE):
         batch_no = i // BATCH_SIZE + 1
@@ -994,6 +1127,7 @@ def run_funnel_job() -> tuple[dict[str, list[tuple[str, float]]], dict]:
         smallcap_df,
         cfg,
         breadth=breadth_context,
+        panic_snapshot=panic_snapshot,
     )
     print(
         "[funnel] 大盘总闸: "
@@ -1004,6 +1138,8 @@ def run_funnel_job() -> tuple[dict[str, list[tuple[str, float]]], dict]:
         f"smallcap_code={benchmark_context.get('smallcap_code')}, smallcap_today={benchmark_context.get('smallcap_today_pct')}, "
         f"breadth={benchmark_context.get('breadth')}, "
         f"panic_triggered={benchmark_context.get('panic_triggered')}, panic_reasons={benchmark_context.get('panic_reasons')}, "
+        f"repair_triggered={benchmark_context.get('repair_triggered')}, repair_reasons={benchmark_context.get('repair_reasons')}, "
+        f"panic_snapshot={benchmark_context.get('panic_snapshot')}, "
         f"tuned={benchmark_context['tuned']}"
     )
 
@@ -1068,10 +1204,6 @@ def run_funnel_job() -> tuple[dict[str, list[tuple[str, float]]], dict]:
         f"Top行业={top_sectors}, 各触发={metrics['by_trigger']}"
     )
 
-    # 还原环境变量，避免污染同进程内的后续任务
-    if EXECUTOR_MODE == "process" and not _baostock_orig:
-        os.environ.pop("DATA_SOURCE_DISABLE_BAOSTOCK", None)
-
     return triggers, metrics
 
 
@@ -1113,17 +1245,31 @@ def run(webhook_url: str) -> tuple[bool, list[dict], dict]:
     bench_line = "未知"
     if benchmark_context:
         breadth = benchmark_context.get("breadth", {}) or {}
+        panic_snapshot = benchmark_context.get("panic_snapshot", {}) or {}
+        panic_text = (
+            f", down_extreme({CRASH_EXTREME_DROP_PCT:g})={panic_snapshot.get('down_extreme_count')}, "
+            f"down9={panic_snapshot.get('down_9_count')}, "
+            f"down10={panic_snapshot.get('down_10_count')}, "
+            f"up9={panic_snapshot.get('up_9_count')}"
+            if panic_snapshot.get("ok")
+            else ""
+        )
         breadth_text = (
             f", breadth={breadth.get('ratio_pct')}% "
             f"(prev={breadth.get('prev_ratio_pct')}%, Δ={breadth.get('delta_pct')}%, n={breadth.get('sample_size')})"
             if breadth
             else ""
         )
+        repair_text = (
+            f", repair={benchmark_context.get('repair_reasons')}"
+            if benchmark_context.get("repair_triggered")
+            else ""
+        )
         bench_line = (
             f"{benchmark_context.get('regime')} | close={benchmark_context.get('close')} "
             f"ma50={benchmark_context.get('ma50')} ma200={benchmark_context.get('ma200')} "
             f"3d={benchmark_context.get('recent3_pct')} cum3={benchmark_context.get('recent3_cum_pct')}"
-            f"{breadth_text}"
+            f"{breadth_text}{panic_text}{repair_text}"
         )
 
     lines = [
