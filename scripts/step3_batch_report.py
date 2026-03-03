@@ -10,8 +10,7 @@ import os
 import re
 import sys
 import time
-from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import date, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -23,20 +22,18 @@ from integrations.llm_client import call_llm
 from integrations.rag_veto import is_rag_veto_enabled, run_negative_news_veto
 from integrations.data_source import fetch_index_hist, fetch_sector_map, fetch_stock_spot_snapshot
 from utils.feishu import send_feishu_notification
+from utils.trading_clock import CN_TZ, resolve_end_calendar_day
 from core.wyckoff_engine import normalize_hist_from_fetch
 
 TRADING_DAYS = 500
 GEMINI_MODEL_FALLBACK = "gemini-2.0-flash-lite"
-OPERATION_TARGET = 6
-STEP3_MAX_AI_INPUT = int(os.getenv("STEP3_MAX_AI_INPUT", "0"))
+STEP3_MAX_AI_INPUT = 0
 STEP3_MAX_PER_INDUSTRY = int(os.getenv("STEP3_MAX_PER_INDUSTRY", "5"))
 STEP3_MAX_OUTPUT_TOKENS = 32768
 DYNAMIC_MAINLINE_BONUS_RATE = 0.15
 DYNAMIC_MAINLINE_TOP_N = 3
 DYNAMIC_MAINLINE_MIN_CLUSTER = 2
-STEP3_ENABLE_COMPRESSION = os.getenv("STEP3_ENABLE_COMPRESSION", "1").strip().lower() in {
-    "1", "true", "yes", "on"
-}
+STEP3_ENABLE_COMPRESSION = False
 STEP3_ENABLE_RAG_VETO = os.getenv("STEP3_ENABLE_RAG_VETO", "1").strip().lower() in {
     "1", "true", "yes", "on"
 }
@@ -48,17 +45,8 @@ HIGHLIGHT_PCT_THRESHOLD = 5.0
 HIGHLIGHT_VOL_RATIO = 2.0
 DEBUG_MODEL_IO = os.getenv("DEBUG_MODEL_IO", "").strip().lower() in {"1", "true", "yes", "on"}
 DEBUG_MODEL_IO_FULL = os.getenv("DEBUG_MODEL_IO_FULL", "").strip().lower() in {"1", "true", "yes", "on"}
-CN_TZ = ZoneInfo("Asia/Shanghai")
-MARKET_CLOSE_HOUR = int(os.getenv("MARKET_CLOSE_HOUR", "15"))
-MARKET_DATA_READY_HOUR = int(
-    os.getenv(
-        "MARKET_DATA_READY_HOUR",
-        str(max(MARKET_CLOSE_HOUR, 20)),
-    )
-)
-ENFORCE_TARGET_TRADE_DATE = os.getenv(
-    "ENFORCE_TARGET_TRADE_DATE", "1"
-).strip().lower() in {"1", "true", "yes", "on"}
+# 已按策略要求关闭“目标交易日强校验”，避免数据源时差导致候选被整批跳过。
+ENFORCE_TARGET_TRADE_DATE = False
 STEP3_ENABLE_SPOT_PATCH = os.getenv("STEP3_ENABLE_SPOT_PATCH", "1").strip().lower() in {
     "1",
     "true",
@@ -104,8 +92,8 @@ def _dump_model_input(
 
 def _has_required_sections(report: str) -> bool:
     text = (report or "").replace(" ", "")
-    has_watch = ("观察池" in text) or ("自选观察池" in text)
-    has_trade = ("可操作池" in text) or ("操作池" in text)
+    has_watch = ("继续观察" in text) or ("观察池" in text)
+    has_trade = ("立刻建仓" in text) or ("可操作池" in text) or ("操作池" in text)
     return has_watch and has_trade
 
 
@@ -116,15 +104,15 @@ def _repair_report_structure(
     selected_codes: list[str],
 ) -> str:
     """
-    当模型未给出“观察池/操作池”双层结构时，做一次结构修复重写。
+    当模型未给出“继续观察/立刻建仓”双层结构时，做一次结构修复重写。
     """
     if not report.strip():
         return report
 
     repair_system = (
         "你是格式修复器。请将输入研报重排为标准 Markdown，"
-        "必须包含两个章节：1) 观察池（数量不限，含观察条件）"
-        f" 2) 可操作池（固定 {OPERATION_TARGET} 只，若不足需说明原因）。"
+        "必须包含两个章节：1) 继续观察（数量不限，含观察条件）"
+        " 2) 立刻建仓（数量不限，按优先级排序）。"
         "不可新增未在输入中出现的股票代码。"
     )
     repair_user = (
@@ -151,17 +139,17 @@ def _repair_report_structure(
 
 def _build_fallback_sections(selected_df: pd.DataFrame) -> str:
     """
-    最后兜底：确保飞书一定出现“观察池/可操作池”结果块。
+    最后兜底：确保飞书一定出现“继续观察/立刻建仓”结果块。
     """
     if selected_df is None or selected_df.empty:
         return (
-            "## 📚 观察池（系统兜底）\n"
+            "## 👀 继续观察（系统兜底）\n"
             "- 本轮无可用候选。\n\n"
-            f"## ⚔️ 可操作池（系统兜底，目标 {OPERATION_TARGET} 只）\n"
-            "- 本轮无可操作标的。"
+            "## 🚀 立刻建仓（系统兜底）\n"
+            "- 本轮无可建仓标的。"
         )
 
-    lines = ["## 📚 观察池（系统兜底）"]
+    lines = ["## 👀 继续观察（系统兜底）"]
     for _, row in selected_df.iterrows():
         code = str(row.get("code", ""))
         name = str(row.get("name", code))
@@ -173,17 +161,8 @@ def _build_fallback_sections(selected_df: pd.DataFrame) -> str:
         )
 
     lines.append("")
-    lines.append(f"## ⚔️ 可操作池（系统兜底，目标 {OPERATION_TARGET} 只）")
-    top_ops = selected_df.head(OPERATION_TARGET)
-    if top_ops.empty:
-        lines.append("- 无")
-    else:
-        for _, row in top_ops.iterrows():
-            code = str(row.get("code", ""))
-            name = str(row.get("name", code))
-            lines.append(
-                f"- `{code} {name}` | 条件建仓: 仅在战区内缩量回踩或强势确认后 1/3 试单。"
-            )
+    lines.append("## 🚀 立刻建仓（系统兜底）")
+    lines.append("- 无（模型未输出可建仓标的，保持观察）")
     return "\n".join(lines)
 
 
@@ -205,15 +184,21 @@ def _normalize_structured_pool(
     code_name: dict[str, str],
 ) -> dict[str, list[dict[str, str]]]:
     watch_raw = (
-        payload.get("watch_pool")
+        payload.get("continue_watch")
+        or payload.get("observe_pool")
+        or payload.get("watch_pool")
         or payload.get("observation_pool")
         or payload.get("watchlist")
+        or payload.get("继续观察")
         or payload.get("观察池")
         or []
     )
     ops_raw = (
-        payload.get("operation_pool")
+        payload.get("build_now")
+        or payload.get("immediate_build")
+        or payload.get("operation_pool")
         or payload.get("tradable_pool")
+        or payload.get("立刻建仓")
         or payload.get("操作池")
         or payload.get("可操作池")
         or []
@@ -312,13 +297,10 @@ def _extract_codes_from_text(
 def _job_end_calendar_day() -> date:
     """
     定时任务统一口径：
-    - 北京时间达到 MARKET_DATA_READY_HOUR（默认 >=20:00）走 T+0（当天）
-    - 否则走 T-1（上一自然日），避免 15:00~18:00 数据源时差导致截面错位
+    - 北京时间 17:00-23:59 走 T（当天）
+    - 北京时间 00:00-16:59 走 T-1（上一自然日）
     """
-    now = datetime.now(CN_TZ)
-    if now.hour >= MARKET_DATA_READY_HOUR:
-        return now.date()
-    return (now - timedelta(days=1)).date()
+    return resolve_end_calendar_day()
 
 
 def _latest_trade_date_from_hist(df: pd.DataFrame) -> date | None:
@@ -721,6 +703,7 @@ def run(
         )
 
     # P2: RAG 防雷（负面新闻关键词 veto）
+    # 注意：RAG 永远在压缩/硬上限之后执行，确保筛查集合最多为 STEP3_MAX_AI_INPUT。
     rag_veto_lines: list[str] = []
     if STEP3_ENABLE_RAG_VETO and is_rag_veto_enabled() and not selected_df.empty:
         rag_inputs = [
@@ -751,9 +734,9 @@ def run(
     if not selected_codes:
         report = (
             "# 🏛️ Alpha 投委会机密电报：今日最终决断\n\n"
-            "## 📚 观察池（数量不限）\n"
+            "## 👀 继续观察\n"
             "- 无（候选均被 RAG 防雷 veto 或数据不足）\n\n"
-            f"## ⚔️ 可操作池（固定 {OPERATION_TARGET} 只）\n"
+            "## 🚀 立刻建仓\n"
             "- 无（风险过高，今日观望）"
         )
         if rag_veto_lines:
@@ -791,6 +774,7 @@ def run(
 
     benchmark_lines = []
     if benchmark_context:
+        breadth_ctx = benchmark_context.get("breadth", {}) or {}
         benchmark_lines.append("[宏观水温 / Benchmark Context]")
         benchmark_lines.append(
             f"regime={benchmark_context.get('regime')}, "
@@ -804,6 +788,14 @@ def run(
             f"recent3_cum_pct={benchmark_context.get('recent3_cum_pct')}, "
             f"tuned={benchmark_context.get('tuned')}"
         )
+        if breadth_ctx:
+            benchmark_lines.append(
+                f"breadth_pct={breadth_ctx.get('ratio_pct')}, "
+                f"breadth_prev_pct={breadth_ctx.get('prev_ratio_pct')}, "
+                f"breadth_delta_pct={breadth_ctx.get('delta_pct')}, "
+                f"breadth_sample={breadth_ctx.get('sample_size')}, "
+                f"breadth_ma_window={breadth_ctx.get('ma_window')}"
+            )
 
     user_message = (
         ("{}\n\n".format("\n".join(benchmark_lines)) if benchmark_lines else "")
@@ -821,10 +813,9 @@ def run(
             if STEP3_ENABLE_COMPRESSION
             else "以下是通过 Wyckoff Funnel 命中的全量候选名单（未压缩）。\n"
         )
-        + "请先从全部输入中筛出“值得加入自选观察池”的标的（数量不限），并明确每只的观察条件；"
-        + f"再从观察池中严格挑选“次日可买入的操作池”{OPERATION_TARGET}只。\n"
-        + f"输出必须包含两个部分：1) 观察池（不限，含观察条件） 2) 操作池（固定{OPERATION_TARGET}只）。\n"
-        + "硬约束：操作池必须是观察池子集，且两部分只能使用输入列表中的股票代码。\n\n"
+        + "请仅做二分类："
+        + "1) 继续观察 2) 立刻建仓。\n"
+        + "输出必须包含这两个部分，且只能使用输入列表中的股票代码，不得遗漏或新增。\n\n"
         + "交易执行硬约束：\n"
         + "1) 禁止单点价格指令，必须给“结构战区(Action Zone) + 盘面确认条件(Tape Condition)”。\n"
         + "2) 战区需围绕每只股票的“价格锚点（最新收盘价）”描述，但不得刻舟求剑。\n"
@@ -868,7 +859,7 @@ def run(
                 return (False, "llm_failed", "")
 
     if not _has_required_sections(report):
-        print("[step3] 首版研报缺少观察池/可操作池，执行一次结构修复")
+        print("[step3] 首版研报缺少继续观察/立刻建仓，执行一次结构修复")
         report = _repair_report_structure(
             report=report,
             model=used_model or model,
@@ -885,8 +876,7 @@ def run(
         for _, row in selected_df.iterrows()
     }
     selected_set = set(selected_codes)
-    # 优先直接 JSON 解析；不足时正则扫文本；最后从候选列表补齐。
-    # 不再发起第二次 LLM 调用，避免延迟翻倍和 token 浪费。
+    # 优先直接 JSON 解析；若无法解析则不做“补齐到固定数量”。
     structured = _try_parse_structured_report(
         report=report,
         allowed_codes=selected_set,
@@ -898,17 +888,9 @@ def run(
             code = str(item.get("code", "")).strip()
             if code and code not in ops_codes:
                 ops_codes.append(code)
-    if not ops_codes:
-        ops_codes = _extract_codes_from_text(report, selected_set)
-    if len(ops_codes) < OPERATION_TARGET:
-        for c in selected_codes:
-            if c not in ops_codes:
-                ops_codes.append(c)
-            if len(ops_codes) >= OPERATION_TARGET:
-                break
-    ops_lines = [f"- {c} {code_name.get(c, c)}" for c in ops_codes[:OPERATION_TARGET]]
+    ops_lines = [f"- {c} {code_name.get(c, c)}" for c in ops_codes]
     ops_preview = (
-        "## ⚔️ 可操作池速览（前置）\n"
+        "## 🚀 立刻建仓速览（前置）\n"
         + ("\n".join(ops_lines) if ops_lines else "- 无")
         + "\n\n---\n"
     )

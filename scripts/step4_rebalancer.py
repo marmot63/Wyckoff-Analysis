@@ -14,9 +14,8 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from uuid import uuid4
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -33,20 +32,11 @@ from integrations.supabase_portfolio import (
     upsert_daily_nav,
 )
 from scripts.step3_batch_report import generate_stock_payload
+from utils.trading_clock import CN_TZ, resolve_end_calendar_day
 
 TRADING_DAYS = 500
 TELEGRAM_MAX_LEN = 3900
-CN_TZ = ZoneInfo("Asia/Shanghai")
-MARKET_CLOSE_HOUR = int(os.getenv("MARKET_CLOSE_HOUR", "15"))
-MARKET_DATA_READY_HOUR = int(
-    os.getenv(
-        "MARKET_DATA_READY_HOUR",
-        str(max(MARKET_CLOSE_HOUR, 20)),
-    )
-)
-ENFORCE_TARGET_TRADE_DATE = os.getenv(
-    "ENFORCE_TARGET_TRADE_DATE", "1"
-).strip().lower() in {"1", "true", "yes", "on"}
+ENFORCE_TARGET_TRADE_DATE = False
 DEBUG_MODEL_IO = os.getenv("DEBUG_MODEL_IO", "").strip().lower() in {"1", "true", "yes", "on"}
 DEBUG_MODEL_IO_FULL = os.getenv("DEBUG_MODEL_IO_FULL", "").strip().lower() in {"1", "true", "yes", "on"}
 STEP4_MAX_OUTPUT_TOKENS = 8192
@@ -543,10 +533,7 @@ def load_portfolio_from_supabase(portfolio_id: str) -> tuple[PortfolioState, str
 
 
 def _job_end_calendar_day() -> date:
-    now = datetime.now(CN_TZ)
-    if now.hour >= MARKET_DATA_READY_HOUR:
-        return now.date()
-    return (now - timedelta(days=1)).date()
+    return resolve_end_calendar_day()
 
 
 def _latest_trade_date_from_hist(df: pd.DataFrame) -> date | None:

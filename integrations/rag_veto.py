@@ -7,6 +7,7 @@ RAG 防雷：基于新闻检索做负面关键词 veto
 from __future__ import annotations
 
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -42,6 +43,8 @@ RAG_TIMEOUT = int(os.getenv("RAG_TIMEOUT", "12"))
 RAG_MAX_WORKERS = int(os.getenv("RAG_MAX_WORKERS", "6"))
 RAG_NEWS_LOOKBACK_DAYS = int(os.getenv("RAG_NEWS_LOOKBACK_DAYS", "7"))
 RAG_MAX_RESULTS = int(os.getenv("RAG_MAX_RESULTS", "5"))
+_STAR_ST_PATTERN = re.compile(r"(?<![a-z0-9])(?:\*|＊)st\s*[\u4e00-\u9fff]", re.IGNORECASE)
+_ST_PATTERN = re.compile(r"(?<![a-z0-9\*＊])st\s*[\u4e00-\u9fff]", re.IGNORECASE)
 
 
 @dataclass
@@ -65,6 +68,38 @@ def _normalize_keywords() -> list[str]:
         return DEFAULT_NEGATIVE_KEYWORDS
     parts = [x.strip().lower() for x in raw.replace("，", ",").split(",") if x.strip()]
     return parts or DEFAULT_NEGATIVE_KEYWORDS
+
+
+def _normalize_match_text(s: str) -> str:
+    return re.sub(r"\s+", "", str(s or "")).lower()
+
+
+def _is_relevant_result(code: str, name: str, title: str, content: str) -> bool:
+    """
+    仅保留与当前股票相关的新闻结果，避免英文同名/缩写污染。
+    """
+    body = _normalize_match_text(f"{title} {content}")
+    if not body:
+        return False
+    code_s = re.sub(r"\D+", "", str(code or ""))
+    name_s = _normalize_match_text(name)
+    return (bool(code_s) and code_s in body) or (bool(name_s) and name_s in body)
+
+
+def _extract_hits(text: str, keywords: list[str]) -> list[str]:
+    hits: list[str] = []
+    for kw in keywords:
+        k = str(kw or "").strip().lower()
+        if not k or k in {"st", "*st"}:
+            continue
+        if k in text and k not in hits:
+            hits.append(k)
+
+    if _STAR_ST_PATTERN.search(text):
+        hits.append("*st")
+    if _ST_PATTERN.search(text):
+        hits.append("st")
+    return hits
 
 
 def _tavily_search(query: str, max_results: int = RAG_MAX_RESULTS) -> list[dict[str, Any]]:
@@ -150,6 +185,8 @@ def _scan_one(code: str, name: str, keywords: list[str]) -> VetoResult:
         title = str(item.get("title", "")).strip()
         content = str(item.get("content", "")).strip()
         url = str(item.get("url", "")).strip()
+        if not _is_relevant_result(code, name, title, content):
+            continue
         merged = f"{title}\n{content}".strip()
         if merged:
             text_parts.append(merged.lower())
@@ -157,7 +194,7 @@ def _scan_one(code: str, name: str, keywords: list[str]) -> VetoResult:
             evidence.append(f"{title} | {url}" if url else title)
     combined = "\n".join(text_parts)
 
-    hits = [kw for kw in keywords if kw.lower() in combined]
+    hits = _extract_hits(combined, keywords)
     veto = len(hits) > 0
     return VetoResult(code=code, name=name, veto=veto, hits=hits, evidence=evidence[:3], error=None)
 

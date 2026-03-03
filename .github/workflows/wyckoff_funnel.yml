@@ -2,8 +2,8 @@ name: Wyckoff Funnel
 
 on:
   schedule:
-    # 北京 20:10 (UTC+8)，周一到周五
-    - cron: '10 12 * * 1-5'
+    # 北京 18:30 (UTC+8)，周一到周五
+    - cron: '30 10 * * 1-5'
   workflow_dispatch:
 
 concurrency:
@@ -14,6 +14,7 @@ jobs:
   run:
     runs-on: ubuntu-latest
     env:
+      PYTHONUNBUFFERED: "1"
       FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
@@ -28,7 +29,6 @@ jobs:
       TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
       SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
       TZ: Asia/Shanghai
-      MARKET_DATA_READY_HOUR: "20"
 
     steps:
       - uses: actions/checkout@v4
@@ -48,7 +48,9 @@ jobs:
         run: mkdir -p logs
 
       - name: Run daily job
-        run: python scripts/daily_job.py --logs ${{ github.workspace }}/logs/daily_job.log
+        run: |
+          python -u scripts/daily_job.py --logs ${{ github.workspace }}/logs/daily_job.log \
+            2>&1 | tee -a ${{ github.workspace }}/logs/daily_job.console.log
 
       - name: Upload artifacts
         if: always()

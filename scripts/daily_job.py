@@ -43,7 +43,7 @@ def _now() -> str:
 
 def _log(msg: str, logs_path: str | None = None) -> None:
     line = f"[{_now()}] {msg}"
-    print(line)
+    print(line, flush=True)
     if logs_path:
         os.makedirs(os.path.dirname(logs_path) or ".", exist_ok=True)
         with open(logs_path, "a", encoding="utf-8") as f:

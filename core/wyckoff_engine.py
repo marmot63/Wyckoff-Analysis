@@ -93,10 +93,18 @@ class FunnelConfig:
     rs_min_long: float = 0.0
     rs_min_short: float = 0.0
     enable_rs_filter: bool = True
-    require_bench_latest_alignment: bool = True
+    enable_rps_filter: bool = True
+    rps_window_fast: int = 50
+    rps_window_slow: int = 120
+    rps_fast_min: float = 75.0
+    rps_slow_min: float = 70.0
+    require_bench_latest_alignment: bool = False
 
     # Layer 3
+    # 行业共振过滤：按“行业样本数分位阈值 + 最小样本数”动态过滤，避免固定 TopN 误杀。
     top_n_sectors: int = 3
+    sector_min_count: int = 3
+    sector_count_quantile: float = 0.70
 
     # Layer 4 - Spring
     spring_support_window: int = 60
@@ -107,15 +115,16 @@ class FunnelConfig:
     # Layer 4 - LPS
     lps_lookback: int = 3
     lps_ma: int = 20
-    lps_ma_tolerance: float = 0.01
+    lps_ma_tolerance: float = 0.02
     lps_vol_dry_ratio: float = 0.35
     lps_vol_ref_window: int = 60
 
     # Layer 4 - Effort vs Result
     evr_lookback: int = 3
-    evr_vol_ratio: float = 2.0
+    evr_vol_ratio: float = 1.6
     evr_vol_window: int = 20
     evr_max_drop: float = 2.0
+    evr_max_bias_200: float = 40.0
     evr_confirm_days: int = 1
     evr_confirm_allow_break_pct: float = 0.0
 
@@ -197,6 +206,17 @@ def layer2_strength(
             return None
         return float(((s / 100.0 + 1.0).prod() - 1.0) * 100.0)
 
+    def _close_return_pct(close_series: pd.Series, lookback: int) -> float | None:
+        s = pd.to_numeric(close_series, errors="coerce").dropna()
+        lb = max(int(lookback), 1)
+        if len(s) <= lb:
+            return None
+        start = float(s.iloc[-lb - 1])
+        end = float(s.iloc[-1])
+        if start == 0:
+            return None
+        return (end - start) / start * 100.0
+
     def _calc_rs(
         stock_df: pd.DataFrame, bench_sorted_df: pd.DataFrame
     ) -> tuple[float | None, float | None]:
@@ -227,6 +247,41 @@ def layer2_strength(
             recent_bench = bench_sorted.tail(cfg.bench_drop_days)
             bench_cum = (recent_bench["pct_chg"].dropna() / 100.0 + 1).prod() - 1
             bench_dropping = bench_cum * 100 <= cfg.bench_drop_threshold
+
+    # 截面强弱：RPS50 / RPS120（欧奈尔思路）
+    rps_fast_map: dict[str, float] = {}
+    rps_slow_map: dict[str, float] = {}
+    rps_filter_active = False
+    if cfg.enable_rps_filter and symbols:
+        rows: list[tuple[str, float, float]] = []
+        for sym in symbols:
+            df = df_map.get(sym)
+            if df is None or df.empty:
+                continue
+            df_sorted = _sorted_if_needed(df)
+            close = pd.to_numeric(df_sorted.get("close"), errors="coerce")
+            ret_fast = _close_return_pct(close, cfg.rps_window_fast)
+            ret_slow = _close_return_pct(close, cfg.rps_window_slow)
+            if ret_fast is None or ret_slow is None:
+                continue
+            rows.append((sym, ret_fast, ret_slow))
+        if rows:
+            rps_df = pd.DataFrame(rows, columns=["sym", "ret_fast", "ret_slow"])
+            rps_df["rps_fast"] = (
+                rps_df["ret_fast"].rank(pct=True, ascending=True, method="average")
+                * 100.0
+            )
+            rps_df["rps_slow"] = (
+                rps_df["ret_slow"].rank(pct=True, ascending=True, method="average")
+                * 100.0
+            )
+            rps_fast_map = (
+                rps_df.set_index("sym")["rps_fast"].astype(float).to_dict()
+            )
+            rps_slow_map = (
+                rps_df.set_index("sym")["rps_slow"].astype(float).to_dict()
+            )
+            rps_filter_active = True
 
     passed: list[str] = []
     for sym in symbols:
@@ -268,7 +323,18 @@ def layer2_strength(
             else:
                 rs_ok = (rs_long >= cfg.rs_min_long) and (rs_short >= cfg.rs_min_short)
 
-        if (bullish_alignment or holding_ma20) and rs_ok:
+        rps_ok = True
+        if cfg.enable_rps_filter and rps_filter_active:
+            rps_fast = rps_fast_map.get(sym)
+            rps_slow = rps_slow_map.get(sym)
+            rps_ok = (
+                rps_fast is not None
+                and rps_slow is not None
+                and rps_fast >= cfg.rps_fast_min
+                and rps_slow >= cfg.rps_slow_min
+            )
+
+        if (bullish_alignment or holding_ma20) and rs_ok and rps_ok:
             passed.append(sym)
     return passed
 
@@ -282,11 +348,22 @@ def layer3_sector_resonance(
     symbols: list[str],
     sector_map: dict[str, str],
     cfg: FunnelConfig,
+    base_symbols: list[str] | None = None,
+    df_map: dict[str, pd.DataFrame] | None = None,
 ) -> tuple[list[str], list[str]]:
     """
-    统计行业分布，保留 Top-N 行业内的股票。
+    统计行业分布，做“行业通过率 + 行业强度中位数”动态过滤：
+    - 行业通过率 = L2行业样本数 / 基准池(L1)行业样本数
+    - 行业强度 = 行业内个股短中期动量分数中位数
+    最终保留同时满足：
+    1) 行业样本数 >= 动态阈值
+    2) 行业通过率 >= 动态阈值
+    3) 行业强度中位数 >= 动态阈值
     返回 (过滤后 symbols, top_sectors)。
     """
+    if base_symbols is None:
+        base_symbols = symbols
+
     counts: dict[str, int] = {}
     for sym in symbols:
         sector = sector_map.get(sym, "")
@@ -296,11 +373,77 @@ def layer3_sector_resonance(
     if not counts:
         return symbols, []
 
-    top_sectors = [
-        s for s, _ in sorted(counts.items(), key=lambda x: -x[1])[: cfg.top_n_sectors]
+    base_counts: dict[str, int] = {}
+    for sym in base_symbols:
+        sector = sector_map.get(sym, "")
+        if sector:
+            base_counts[sector] = base_counts.get(sector, 0) + 1
+
+    # 个股强度：20日收益(70%) + 5日收益(30%) 的截面百分位分数
+    strength_map: dict[str, float] = {}
+    if df_map:
+        rows: list[tuple[str, float, float]] = []
+        for sym in symbols:
+            df = df_map.get(sym)
+            if df is None or df.empty:
+                continue
+            s = _sorted_if_needed(df)
+            close = pd.to_numeric(s.get("close"), errors="coerce").dropna()
+            if len(close) <= 20:
+                continue
+            ret20 = (float(close.iloc[-1]) - float(close.iloc[-21])) / float(close.iloc[-21]) * 100.0
+            ret5 = (float(close.iloc[-1]) - float(close.iloc[-6])) / float(close.iloc[-6]) * 100.0 if len(close) > 5 else ret20
+            rows.append((sym, ret20, ret5))
+        if rows:
+            st_df = pd.DataFrame(rows, columns=["sym", "ret20", "ret5"])
+            st_df["q20"] = st_df["ret20"].rank(pct=True, ascending=True, method="average")
+            st_df["q5"] = st_df["ret5"].rank(pct=True, ascending=True, method="average")
+            st_df["strength"] = 0.7 * st_df["q20"] + 0.3 * st_df["q5"]
+            strength_map = st_df.set_index("sym")["strength"].astype(float).to_dict()
+
+    ranked = sorted(counts.items(), key=lambda x: -x[1])
+    min_count = max(int(cfg.sector_min_count), 1)
+    q = float(cfg.sector_count_quantile)
+    q = min(max(q, 0.0), 1.0)
+    size_arr = np.array(list(counts.values()), dtype=float)
+    q_count = int(np.ceil(np.quantile(size_arr, q))) if size_arr.size > 0 else min_count
+    threshold = max(min_count, q_count)
+
+    # 行业通过率阈值（动态）：按行业通过率分位数（默认与 sector_count_quantile 同步）
+    pass_ratios: list[float] = []
+    pass_ratio_map: dict[str, float] = {}
+    for sec, cnt in ranked:
+        base_cnt = max(int(base_counts.get(sec, 0)), 1)
+        ratio = float(cnt) / float(base_cnt)
+        pass_ratio_map[sec] = ratio
+        pass_ratios.append(ratio)
+    pass_threshold = float(np.quantile(np.array(pass_ratios, dtype=float), q)) if pass_ratios else 0.0
+
+    # 行业强度阈值（动态）：行业内强度中位数分位阈值
+    sector_strength_map: dict[str, float] = {}
+    for sec, _ in ranked:
+        vals = [strength_map.get(sym) for sym in symbols if sector_map.get(sym, "") == sec and sym in strength_map]
+        vals = [float(v) for v in vals if v is not None]
+        sector_strength_map[sec] = float(np.median(vals)) if vals else 0.0
+    strength_vals = list(sector_strength_map.values())
+    strength_threshold = float(np.quantile(np.array(strength_vals, dtype=float), q)) if strength_vals else 0.0
+
+    keep_sectors = [
+        s
+        for s, c in ranked
+        if c >= threshold
+        and pass_ratio_map.get(s, 0.0) >= pass_threshold
+        and sector_strength_map.get(s, 0.0) >= strength_threshold
     ]
-    top_set = set(top_sectors)
-    filtered = [sym for sym in symbols if sector_map.get(sym, "") in top_set]
+    if not keep_sectors:
+        # 极端场景兜底：至少保留样本最多的行业，避免空集。
+        max_count = int(size_arr.max()) if size_arr.size > 0 else 0
+        keep_sectors = [s for s, c in ranked if c == max_count]
+
+    top_n = max(int(cfg.top_n_sectors), 0)
+    top_sectors = [s for s, _ in (ranked[:top_n] if top_n > 0 else ranked)]
+    keep_set = set(keep_sectors)
+    filtered = [sym for sym in symbols if sector_map.get(sym, "") in keep_set]
     return filtered, top_sectors
 
 
@@ -422,7 +565,7 @@ def _detect_evr(df: pd.DataFrame, cfg: FunnelConfig) -> float | None:
     close_last = close.iloc[-1]
     if pd.notna(ma200_last) and pd.notna(close_last) and float(ma200_last) > 0:
         bias_200 = (float(close_last) - float(ma200_last)) / float(ma200_last) * 100.0
-        if bias_200 > 30.0:
+        if bias_200 > float(cfg.evr_max_bias_200):
             return None
 
     # 基准量能取“最近窗口但剔除最后两天”，避免当前异动污染基线
@@ -531,7 +674,13 @@ def run_funnel(
 
     l1 = layer1_filter(all_symbols, name_map, market_cap_map, prepared_df_map, cfg)
     l2 = layer2_strength(l1, prepared_df_map, bench_df, cfg)
-    l3, top_sectors = layer3_sector_resonance(l2, sector_map, cfg)
+    l3, top_sectors = layer3_sector_resonance(
+        l2,
+        sector_map,
+        cfg,
+        base_symbols=l1,
+        df_map=prepared_df_map,
+    )
     triggers = layer4_triggers(l3, prepared_df_map, cfg)
 
     return FunnelResult(
