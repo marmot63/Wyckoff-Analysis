@@ -55,6 +55,7 @@ from utils.feishu import send_feishu_notification
 from utils.trading_clock import CN_TZ, resolve_end_calendar_day
 
 TRIGGER_LABELS = {
+    "sos": "SOS（量价点火）",
     "spring": "Spring（终极震仓）",
     "lps": "LPS（缩量回踩）",
     "evr": "Effort vs Result（放量不跌）",
@@ -1344,10 +1345,11 @@ def run(webhook_url: str) -> tuple[bool, list[dict], dict]:
             [
                 "",
                 "**为什么没命中（L4触发=0）**",
-                f"• Spring={int(by_trigger.get('spring', 0))}, "
+                f"• SOS点火={int(by_trigger.get('sos', 0))}, "
+                f"Spring={int(by_trigger.get('spring', 0))}, "
                 f"LPS={int(by_trigger.get('lps', 0))}, "
                 f"EVR={int(by_trigger.get('evr', 0))}",
-                "• 当前候选仅停留在 L3 共振阶段，尚未出现日线级别的 Spring/LPS/EVR 扳机信号。",
+                "• 当前候选停留在威科夫初期（或通道内），尚未出现日线级别的 SOS/Spring/LPS/EVR 扳机信号。",
                 "• AI 输入集合按“通道配额制”构建；本轮未产生可入选标的，因此 AI 输入为 0。",
             ]
         )

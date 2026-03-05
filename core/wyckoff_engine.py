@@ -153,6 +153,13 @@ class FunnelConfig:
     evr_confirm_days: int = 1
     evr_confirm_allow_break_pct: float = 0.0
 
+    # Layer 4 - SOS / JAC (Sign of Strength / Jump Across the Creek)
+    sos_pct_min: float = 4.5  # 点火当日最小涨幅（%）
+    sos_vol_ratio: float = 2.0  # 点火当日相比近期均量的最小倍数（爆量）
+    sos_vol_window: int = 20  # 计算点火爆量时的参考窗口
+    sos_breakout_window: int = 20  # 要求突破或接近近 N 日的高点
+    sos_max_bias_200: float = 40.0  # 防止在极高位将 Buying Climax 误判为 SOS
+
     # Markup 阶段识别（Layer 2.5）
     enable_markup_detection: bool = True
     markup_ma_crossover_confirm_days: int = 5  # MA50 穿过 MA200 后，需要连续 N 日在上方
@@ -818,6 +825,76 @@ def _detect_evr(df: pd.DataFrame, cfg: FunnelConfig) -> float | None:
     return None
 
 
+def _detect_sos(df: pd.DataFrame, cfg: FunnelConfig) -> float | None:
+    """
+    Sign of Strength (SOS) / Jump Across the Creek (JAC):
+    点火标志。特征为低位脱盘、放量大阳线，破除重要阻力或近期高点。
+    返回 score（量比）或 None。
+    """
+    if len(df) < max(cfg.sos_vol_window, cfg.sos_breakout_window, 200) + 2:
+        # Fallback to a smaller necessary length if 200 is too strict, but MA200 needs 200 days
+        # We handle MA200 dynamically inside
+        pass
+        
+    if len(df) < max(cfg.sos_vol_window, cfg.sos_breakout_window) + 2:
+        return None
+
+    df_s = _sorted_if_needed(df)
+    
+    close = pd.to_numeric(df_s["close"], errors="coerce")
+    volume = pd.to_numeric(df_s["volume"], errors="coerce")
+    pct_chg = pd.to_numeric(df_s["pct_chg"], errors="coerce")
+    high = pd.to_numeric(df_s["high"], errors="coerce")
+    
+    if close.isna().all() or volume.isna().all() or pct_chg.isna().all():
+        return None
+        
+    # 位阶保护：高位爆量很大可能是 Buying Climax（派发），排除极大乖离
+    close_last = close.iloc[-1]
+    if len(close) >= 200:
+        ma200 = close.rolling(200).mean()
+        ma200_last = ma200.iloc[-1]
+        if pd.notna(ma200_last) and pd.notna(close_last) and float(ma200_last) > 0:
+            bias_200 = (float(close_last) - float(ma200_last)) / float(ma200_last) * 100.0
+            if bias_200 > float(cfg.sos_max_bias_200):
+                return None
+            
+    # 只看当天（威科夫点火通常是当天的明显大阳线）
+    day_pct = float(pct_chg.iloc[-1])
+    if pd.isna(day_pct) or day_pct < cfg.sos_pct_min:
+        return None
+        
+    # 量能要求：暴击量
+    vol_ref = volume.tail(cfg.sos_vol_window + 1).iloc[:-1]
+    vol_ref_avg = float(vol_ref.mean()) if not vol_ref.empty else 0.0
+    if vol_ref_avg <= 0:
+        return None
+    vol_ratio = float(volume.iloc[-1]) / vol_ref_avg
+    if vol_ratio < cfg.sos_vol_ratio:
+        return None
+        
+    # 结构突破要求：创N日新高，或强势穿透季线/半年线
+    ma50 = close.rolling(50).mean()
+    ma50_last = ma50.iloc[-1] if not ma50.empty else None
+    
+    recent_highs = high.tail(cfg.sos_breakout_window + 1).iloc[:-1]
+    max_recent_high = float(recent_highs.max()) if not recent_highs.empty else float("inf")
+    
+    # 接近或突破近期高点 (容差2%)
+    is_breakout = float(close_last) >= max_recent_high * 0.98  
+    
+    is_ma_crossover = False
+    if ma50_last is not None and pd.notna(ma50_last):
+        prev_close = float(close.iloc[-2])
+        if prev_close <= float(ma50_last) and float(close_last) > float(ma50_last):
+            is_ma_crossover = True
+            
+    if not (is_breakout or is_ma_crossover):
+        return None
+        
+    return vol_ratio
+
+
 def layer4_triggers(
     symbols: list[str],
     df_map: dict[str, pd.DataFrame],
@@ -827,6 +904,7 @@ def layer4_triggers(
     在最终候选集上运行 Spring / LPS / EffortVsResult 检测。
     """
     results: dict[str, list[tuple[str, float]]] = {
+        "sos": [],
         "spring": [],
         "lps": [],
         "evr": [],
@@ -845,6 +923,9 @@ def layer4_triggers(
             score = _detect_evr(df, cfg)
             if score is not None:
                 results["evr"].append((sym, score))
+        score = _detect_sos(df, cfg)
+        if score is not None:
+            results["sos"].append((sym, score))
     return results
 
 
