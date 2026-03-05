@@ -2,8 +2,8 @@ name: Premarket Risk
 
 on:
   schedule:
-    # 北京时间 08:30（UTC+8），周一到周五
-    - cron: "30 0 * * 1-5"
+    # 北京时间 08:28（UTC+8），为了避开 GitHub Actions 整点/半点的高峰期丢包问题，提前2分钟
+    - cron: "28 0 * * 1-5"
   workflow_dispatch:
 
 concurrency:
