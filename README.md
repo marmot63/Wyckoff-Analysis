@@ -12,7 +12,7 @@
 
 | 功能 | 说明 |
 |------|------|
-| 📊 **每日选股** | 配置 GitHub Actions 后，北京时间周日到周四 18:30 自动跑 Wyckoff Funnel，从主板+创业板筛选候选并推送飞书 |
+| 📊 **每日选股** | 配置 GitHub Actions 后，北京时间周日到周四 18:25 自动跑 Wyckoff Funnel，从主板+创业板筛选候选并推送飞书 |
 | 📘 **策略手册** | 见 `README_STRATEGY.md`（策略流程、风控公式、Step2/3/4 执行口径） |
 | 🔬 **Wyckoff Funnel** | 多层漏斗筛选：剥离垃圾 → 六通道强弱甄别（主升/点火/潜伏/吸筹/地量/护盘）→ Markup 识别 → 威科夫狙击 → AI 双轨分析 |
 | 🤖 **AI 研报** | 对筛选结果生成三阵营判断（逻辑破产/储备营地/处于起跳板），含结构战区、确认条件及防踏空策略 |
@@ -45,7 +45,7 @@
 需要 **Python 3.10+**。
 
 ```bash
-cd akshare
+cd Wyckoff-Analysis
 python3 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 python -m pip install -U pip
@@ -98,7 +98,7 @@ python -u -m integrations.fetch_a_share_csv --symbols 000973 600798 601390
 
 仓库内置工作流：`.github/workflows/wyckoff_funnel.yml`
 
-- **定时**：北京时间周日到周四 18:30
+- **定时**：北京时间周日到周四 18:25
 - **手动**：Actions 页面选择 `Wyckoff Funnel` → `Run workflow`
 
 ### 配置 GitHub Secrets
@@ -111,11 +111,11 @@ python -u -m integrations.fetch_a_share_csv --symbols 000973 600798 601390
 | `GEMINI_API_KEY` | 是 | AI 研报 |
 | `TUSHARE_TOKEN` | 是 | 行情与市值数据 |
 | `GEMINI_MODEL` | 否 | 未配则用默认模型 |
-| `SUPABASE_URL` | Step4 用 | 是（Step4 依赖 USER_LIVE） |
-| `SUPABASE_KEY` | ❌ | Supabase 匿名 Key。 |
-| `SUPABASE_SERVICE_ROLE_KEY` | ❌ | Supabase 管理员 Key (用于脚本读写)。 |
+| `SUPABASE_URL` | Step4 用 | 否（走 `USER_LIVE:<user_id>` 路径时需要） |
+| `SUPABASE_KEY` | ❌ | Supabase 匿名 Key；脚本侧可作为读取兜底。 |
+| `SUPABASE_SERVICE_ROLE_KEY` | ❌ | Supabase 管理员 Key；若 Step4 需要稳定读写，建议优先配置。 |
 | `SUPABASE_USER_ID` | ❌ | **用户锁定**：指定 Step4 运行的目标用户 ID。 |
-| `MY_PORTFOLIO_STATE` | ❌ | **本地账本**：如果不使用 Supabase，可用 JSON 字符串配置持仓 (格式见 `.env.example`)。 |
+| `MY_PORTFOLIO_STATE` | ❌ | **本地账本兜底**：若 `USER_LIVE:<user_id>` 不可用，可用 JSON 字符串配置持仓 (格式见 `.env.example`)。 |
 | `TG_BOT_TOKEN` | ❌ | **私密推送**：Telegram Bot Token，用于接收私密交易建议。 |
 | `TG_CHAT_ID` | ❌ | Telegram Chat ID。 |
 | `TAVILY_API_KEY` | ❌ | **防雷**：用于 RAG 新闻检索 (Tavily)，推荐配置。 |
@@ -142,7 +142,7 @@ python -m scripts.backtest_runner \
   --start 2025-01-01 \
   --end 2025-12-31 \
   --hold-days 5 \
-  --top-n 6 \
+  --top-n 3 \
   --board all \
   --exit-mode sltp \
   --stop-loss -9 \
@@ -151,7 +151,8 @@ python -m scripts.backtest_runner \
   --output-dir analysis/backtest
 ```
 
-默认参数已经切到“只止损不止盈”的实战口径：`--hold-days 5 --exit-mode sltp --stop-loss -9 --take-profit 0`。
+当前脚本默认值是 `--hold-days 15 --top-n 3 --exit-mode sltp --stop-loss -9 --take-profit 0`。  
+如果你要复现目前更贴近实战的收紧口径，推荐使用上面示例里的 `--hold-days 5 --top-n 3`。
 
 回测偏差口径说明（重要）：
 - 默认**关闭**当前截面市值/行业映射过滤（降低 look-ahead bias）。

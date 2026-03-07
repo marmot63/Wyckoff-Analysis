@@ -36,7 +36,7 @@ from scripts.wyckoff_funnel import (
     _calc_market_breadth as _calc_market_breadth_for_regime,
 )
 
-DEFAULT_HOLD_DAYS = 5
+DEFAULT_HOLD_DAYS = 15
 DEFAULT_EXIT_MODE = "sltp"
 DEFAULT_STOP_LOSS_PCT = -9.0
 DEFAULT_TAKE_PROFIT_PCT = 0.0

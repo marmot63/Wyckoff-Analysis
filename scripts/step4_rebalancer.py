@@ -45,13 +45,6 @@ STEP4_MAX_OUTPUT_TOKENS = 8192
 STEP4_ATR_PERIOD = int(os.getenv("STEP4_ATR_PERIOD", "14"))
 STEP4_ATR_MULTIPLIER = float(os.getenv("STEP4_ATR_MULTIPLIER", "2.0"))
 STEP4_MAX_WORKERS = int(os.getenv("STEP4_MAX_WORKERS", "8"))
-STEP4_FORCE_MAX_HOLD_EXIT = os.getenv("STEP4_FORCE_MAX_HOLD_EXIT", "1").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-STEP4_MAX_HOLD_DAYS = max(int(os.getenv("STEP4_MAX_HOLD_DAYS", "5")), 1)
 STEP4_BUY_HARD_STOP_ENABLED = os.getenv("STEP4_BUY_HARD_STOP_ENABLED", "1").strip().lower() in {
     "1",
     "true",
@@ -1100,22 +1093,21 @@ def _process_one_position(
 def _format_position_payload(
     positions: list[PositionItem],
     window,
-) -> tuple[str, list[str], float, dict[str, float], dict[str, float], dict[str, int]]:
+) -> tuple[str, list[str], float, dict[str, float], dict[str, float]]:
     blocks: list[str] = []
     failures: list[str] = []
     live_value_sum = 0.0
     latest_close_map: dict[str, float] = {}
     atr_map: dict[str, float] = {}
-    hold_days_map: dict[str, int] = {}
 
     if not positions:
-        return ("", [], 0.0, {}, {}, {})
+        return ("", [], 0.0, {}, {})
 
     with ThreadPoolExecutor(max_workers=STEP4_MAX_WORKERS) as executor:
         futures = {executor.submit(_process_one_position, pos, window): pos for pos in positions}
         for future in as_completed(futures):
             pos = futures[future]
-            meta_block, fail_msg, val, close, atr, hold_days = future.result()
+            meta_block, fail_msg, val, close, atr, _ = future.result()
             if fail_msg:
                 failures.append(fail_msg)
             if meta_block:
@@ -1124,10 +1116,8 @@ def _format_position_payload(
                 latest_close_map[pos.code] = close
                 if atr is not None:
                     atr_map[pos.code] = atr
-                if hold_days is not None:
-                    hold_days_map[pos.code] = int(hold_days)
 
-    return ("\n\n".join(blocks), failures, live_value_sum, latest_close_map, atr_map, hold_days_map)
+    return ("\n\n".join(blocks), failures, live_value_sum, latest_close_map, atr_map)
 
 
 def _extract_json_block(text: str) -> str:
@@ -1255,51 +1245,6 @@ def _parse_decisions(
             )
         )
     return (market_view, out, None)
-
-
-def _enforce_max_hold_exit(
-    decisions: list[DecisionItem],
-    positions: list[PositionItem],
-    hold_days_map: dict[str, int],
-) -> tuple[list[DecisionItem], int]:
-    if not STEP4_FORCE_MAX_HOLD_EXIT or STEP4_MAX_HOLD_DAYS < 1:
-        return (decisions, 0)
-
-    pos_map = {p.code: p for p in positions if p.shares >= 100}
-    if not pos_map:
-        return (decisions, 0)
-
-    out = list(decisions)
-    idx_map = {d.code: i for i, d in enumerate(out)}
-    forced = 0
-
-    for code, pos in pos_map.items():
-        hold_days = hold_days_map.get(code)
-        if hold_days is None or hold_days < STEP4_MAX_HOLD_DAYS:
-            continue
-
-        forced_decision = DecisionItem(
-            code=code,
-            name=pos.name or code,
-            action="EXIT",
-            entry_zone_min=None,
-            entry_zone_max=None,
-            stop_loss=pos.stop_loss,
-            trim_ratio=None,
-            tape_condition=f"max_hold_days>={STEP4_MAX_HOLD_DAYS}",
-            invalidate_condition="无",
-            is_add_on=True,
-            reason=f"硬规则触发：持仓满 {STEP4_MAX_HOLD_DAYS} 交易日强制清仓（当前={hold_days}）",
-            confidence=1.0,
-        )
-        if code in idx_map:
-            out[idx_map[code]] = forced_decision
-        else:
-            idx_map[code] = len(out)
-            out.append(forced_decision)
-        forced += 1
-
-    return (out, forced)
 
 
 def _dump_model_input(model: str, system_prompt: str, user_message: str, symbols: list[str]) -> None:
@@ -1544,7 +1489,6 @@ def run(
         live_value,
         latest_price_map,
         atr_map,
-        hold_days_map,
     ) = _format_position_payload(
         portfolio.positions,
         window,
@@ -1599,8 +1543,8 @@ def run(
         + f"position_count={len(portfolio.positions)}\n"
         + f"allowed_codes={','.join(sorted(allowed_codes))}\n\n"
         + "[系统硬规则]\n"
-        + f"max_hold_days={STEP4_MAX_HOLD_DAYS} (到期强制 EXIT={int(STEP4_FORCE_MAX_HOLD_EXIT)})\n"
-        + f"buy_stop_mode={STEP4_BUY_STOP_MODE}, buy_stop_pct={STEP4_BUY_HARD_STOP_PCT:.1f}\n\n"
+        + f"buy_stop_mode={STEP4_BUY_STOP_MODE}, buy_stop_pct={STEP4_BUY_HARD_STOP_PCT:.1f}\n"
+        + "仅允许依据结构止损、Distribution 信号与量价破坏做减仓/清仓，不得因为持有天数到期而机械离场。\n\n"
         + "[内部持仓量价切片]\n"
         + (positions_payload if positions_payload else "当前无持仓，仅现金。")
         + "\n\n[外部候选摘要]\n"
@@ -1660,16 +1604,7 @@ def run(
             )
         )
 
-    decisions, forced_exit_count = _enforce_max_hold_exit(
-        decisions=decisions,
-        positions=portfolio.positions,
-        hold_days_map=hold_days_map,
-    )
     decisions = _attach_candidate_meta(decisions, candidate_meta_map)
-    if forced_exit_count > 0:
-        print(
-            f"[step4] 强制持仓到期清仓: count={forced_exit_count}, max_hold_days={STEP4_MAX_HOLD_DAYS}"
-        )
 
     # 补齐候选最新价
     def _fetch_candidate_data(d_code):

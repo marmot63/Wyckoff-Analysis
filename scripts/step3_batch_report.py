@@ -29,6 +29,7 @@ from integrations.data_source import (
 from utils.feishu import send_feishu_notification
 from utils.trading_clock import CN_TZ, resolve_end_calendar_day
 from core.wyckoff_engine import normalize_hist_from_fetch
+from core.sector_rotation import SECTOR_STATE_LABELS
 
 TRADING_DAYS = 500
 GEMINI_MODEL_FALLBACK = "gemini-2.5-flash-lite"
@@ -713,6 +714,10 @@ def _build_track_user_message(
         + "5) 输入中的“量化初筛假设/阶段假设”只是程序的一阶假设，不是结论；若15日切片证据冲突，你必须直接推翻它。\n"
         + "6) 盘面解剖必须结合振幅、收位与量比，明确说明盘中洗盘、承接、冲高回落或拒绝下跌的博弈痕迹。\n"
         + "7) 次日计划优先用 Plan A / Plan B 条件树表达，不要写机械目标价。\n\n"
+        + "8) 若输入中出现【板块状态】与【板块证据】，必须将其视为行业层风向校验：\n"
+        + "   - 连续一致高潮：默认禁止 Attack，只能等待分歧或低位内切；\n"
+        + "   - 主流分歧回撤：优先寻找 Spring / LPS / Test，可用 Probe 试探；\n"
+        + "   - 退潮派发风险：默认归入逻辑破产或储备营地，除非个股结构强到足以推翻行业逆风。\n\n"
         + "\n".join(payloads)
     )
     return message
@@ -787,6 +792,10 @@ def generate_stock_payload(
     quant_score: float | None = None,
     industry_rank: int | None = None,
     policy_tag: str | None = None,
+    sector_state: str | None = None,
+    sector_state_code: str | None = None,
+    sector_note: str | None = None,
+    sector_guidance: str | None = None,
     track: str | None = None,
     stage: str | None = None,
     funnel_score: float | None = None,
@@ -797,6 +806,7 @@ def generate_stock_payload(
     """
     第五步：将 500 天 OHLCV 浓缩为发给 AI 的高密度文本。
     1. 大背景（MA50 / MA200 / 乖离率 / 市值 / 成交额）
+    1.5 板块状态（轮动水温 + 动作限制）
     2. 近 15 日量价切片（放量比 + 涨跌幅 + 振幅 + 收盘位置）
     3. 近 60 日异动高光时刻
     """
@@ -881,6 +891,16 @@ def generate_stock_payload(
         header += f"  [阶段假设] {stage}\n"
     if industry:
         header += f"  [行业/主营] {industry}\n"
+    if sector_state:
+        state_text = str(sector_state).strip()
+        state_code_text = str(sector_state_code or "").strip()
+        if state_code_text:
+            state_text = f"{state_text} ({state_code_text})"
+        header += f"  [板块状态] {state_text}\n"
+    if sector_note:
+        header += f"  [板块证据] {str(sector_note).strip()}\n"
+    if sector_guidance:
+        header += f"  [轮动指引] {str(sector_guidance).strip()}\n"
 
     supply_summary = _build_supply_demand_summary(df)
 
@@ -950,6 +970,8 @@ def run(
     window = _resolve_trading_window(end_calendar_day=end_day, trading_days=TRADING_DAYS)
 
     regime = (benchmark_context or {}).get("regime", "NEUTRAL")
+    sector_rotation_ctx = (benchmark_context or {}).get("sector_rotation", {}) or {}
+    sector_rotation_map = sector_rotation_ctx.get("state_map", {}) or {}
     sector_map = fetch_sector_map()
     market_cap_map = fetch_market_cap_map()
     benchmark_ret_10: float | None = None
@@ -966,6 +988,22 @@ def run(
         code = item["code"]
         name = item.get("name", code)
         tag = item.get("tag", "")
+        industry = str(item.get("industry") or sector_map.get(code, "未知行业") or "未知行业").strip()
+        rotation_info = sector_rotation_map.get(industry, {}) or {}
+        sector_state_code = str(
+            item.get("sector_state_code")
+            or rotation_info.get("state", "")
+            or "NEUTRAL_MIXED"
+        ).strip()
+        sector_state = str(
+            item.get("sector_state")
+            or rotation_info.get("label", "")
+            or SECTOR_STATE_LABELS.get("NEUTRAL_MIXED", "中性混沌")
+        ).strip()
+        sector_note = str(item.get("sector_note") or rotation_info.get("note", "") or "").strip()
+        sector_guidance = str(
+            item.get("sector_guidance") or rotation_info.get("guidance", "") or ""
+        ).strip()
         try:
             df_raw = _fetch_hist(code, window, "qfq")
             df = normalize_hist_from_fetch(df_raw)
@@ -1032,7 +1070,11 @@ def run(
                     "exit_signal": str(item.get("exit_signal", "")).strip(),
                     "exit_price": pd.to_numeric(item.get("exit_price"), errors="coerce"),
                     "exit_reason": str(item.get("exit_reason", "")).strip(),
-                    "industry": sector_map.get(code, "未知行业"),
+                    "industry": industry,
+                    "sector_state": sector_state,
+                    "sector_state_code": sector_state_code,
+                    "sector_note": sector_note,
+                    "sector_guidance": sector_guidance,
                     "market_cap_yi": pd.to_numeric(market_cap_map.get(code), errors="coerce"),
                     "avg_amount_20_yi": avg_amount_20_yi,
                     "bias_200": bias_200,
@@ -1178,6 +1220,10 @@ def run(
             avg_amount_20_yi=pd.to_numeric(row.get("avg_amount_20_yi"), errors="coerce"),
             policy_tag=policy_text,
             stage=str(row.get("stage", "")).strip() or None,
+            sector_state=str(row.get("sector_state", "")).strip() or None,
+            sector_state_code=str(row.get("sector_state_code", "")).strip() or None,
+            sector_note=str(row.get("sector_note", "")).strip() or None,
+            sector_guidance=str(row.get("sector_guidance", "")).strip() or None,
         )
         payloads_by_track.setdefault(track_key, []).append(payload)
         df_by_track[track_key] = pd.concat(
@@ -1208,6 +1254,13 @@ def run(
                 f"breadth_pct={breadth_ctx.get('ratio_pct')}, "
                 f"breadth_delta_pct={breadth_ctx.get('delta_pct')}"
             )
+        rotation_headline = str(sector_rotation_ctx.get("headline", "")).strip()
+        rotation_lines = sector_rotation_ctx.get("overview_lines", []) or []
+        if rotation_headline or rotation_lines:
+            benchmark_lines.append("[板块轮动 / Sector Rotation]")
+            if rotation_headline:
+                benchmark_lines.append(rotation_headline)
+            benchmark_lines.extend(rotation_lines[:4])
 
     active_tracks = [
         track for track in ["Trend", "Accum"] if payloads_by_track.get(track)

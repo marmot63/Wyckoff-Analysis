@@ -31,7 +31,7 @@ from scripts.backtest_runner import run_backtest, _parse_date
 
 # ── 默认参数空间（可通过环境变量 JSON 覆盖） ──
 
-DEFAULT_HOLD_DAYS_GRID = [3, 5, 7, 10]
+DEFAULT_HOLD_DAYS_GRID = [15, 30, 45, 60]
 DEFAULT_STOP_LOSS_GRID = [0.0, -5.0, -8.0, -12.0]  # 0 = 不设止损
 DEFAULT_TAKE_PROFIT_GRID = [0.0, 8.0, 15.0, 25.0]   # 0 = 不设止盈
 DEFAULT_TOP_N_GRID = [3, 5, 8]

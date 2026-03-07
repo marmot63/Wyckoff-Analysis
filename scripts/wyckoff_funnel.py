@@ -47,6 +47,11 @@ from core.wyckoff_engine import (
     FunnelResult,
     allocate_ai_candidates,
 )
+from core.sector_rotation import (
+    SECTOR_STATE_LABELS,
+    SECTOR_STATE_SCORE_BONUS,
+    analyze_sector_rotation,
+)
 from integrations.data_source import (
     fetch_index_hist,
     fetch_sector_map,
@@ -789,6 +794,7 @@ def _rank_l3_candidates(
     triggers: dict[str, list[tuple[str, float]]],
     top_sectors: list[str],
     l2_channel_map: dict[str, str] | None = None,
+    sector_rotation_map: dict[str, dict] | None = None,
 ) -> tuple[list[str], dict[str, float]]:
     """
     对 L3 股票做统一优先级排序，仅用于 AI 输入队列。
@@ -803,10 +809,12 @@ def _rank_l3_candidates(
 
     rows: list[dict] = []
     channel_map = l2_channel_map or {}
+    rotation_map = sector_rotation_map or {}
     for code in l3_symbols:
         df = df_map.get(code)
         industry = str(sector_map.get(code, "") or "未知行业")
         l2_channel = str(channel_map.get(code, "") or "未标注通道")
+        sector_state = str((rotation_map.get(industry, {}) or {}).get("state", "") or "")
         ret20 = None
         ret5 = None
         min_vol_ratio_5d = None
@@ -829,6 +837,7 @@ def _rank_l3_candidates(
                 "min_vol_ratio_5d": min_vol_ratio_5d,
                 "trigger_score": float(trigger_score_map.get(code, 0.0)),
                 "l2_channel": l2_channel,
+                "sector_state": sector_state,
             }
         )
 
@@ -856,12 +865,16 @@ def _rank_l3_candidates(
 
     hot_sector_set = set(top_sectors or [])
     rank_df["hot_bonus"] = rank_df["industry"].isin(hot_sector_set).astype(float) * 0.05
+    rank_df["sector_bonus"] = rank_df["sector_state"].map(
+        lambda x: float(SECTOR_STATE_SCORE_BONUS.get(str(x), 0.0))
+    )
     rank_df["watch_score"] = (
         0.40 * rank_df["q20"]
         + 0.25 * rank_df["q5"]
         + 0.20 * rank_df["dry_q"]
         + 0.15 * rank_df["trigger_q"]
         + rank_df["hot_bonus"]
+        + rank_df["sector_bonus"]
     )
 
     rank_df = rank_df.sort_values("watch_score", ascending=False).reset_index(drop=True)
@@ -1112,6 +1125,14 @@ def run_funnel_job(
         base_symbols=l1_passed,
         df_map=all_df_map,
     )
+    sector_rotation = analyze_sector_rotation(
+        all_df_map,
+        sector_map,
+        universe_symbols=list(all_df_map.keys()),
+        focus_sectors=top_sectors,
+    )
+    benchmark_context["sector_rotation"] = sector_rotation
+    print(f"[funnel] 板块轮动温度计: {sector_rotation.get('headline', '无')}")
 
     # Layer 4 (Wyckoff Triggers)
     # L4 需要 l2_df_map，这里直接用 all_df_map 即可，因为 key 都在里面
@@ -1130,6 +1151,7 @@ def run_funnel_job(
         triggers=triggers,
         top_sectors=top_sectors,
         l2_channel_map=l2_channel_map,
+        sector_rotation_map=(sector_rotation.get("state_map", {}) or {}),
     )
     metrics = {
         "total_symbols": len(all_symbols),
@@ -1154,6 +1176,7 @@ def run_funnel_job(
         "layer2_channel_map": l2_channel_map,
         "layer3": len(l3_passed),
         "top_sectors": top_sectors,
+        "sector_rotation": sector_rotation,
         "layer3_symbols": ranked_l3_symbols or l3_passed,
         "layer3_score_map": l3_score_map,
         "total_hits": total_hits,
@@ -1197,6 +1220,7 @@ def run(webhook_url: str) -> tuple[bool, list[dict], dict]:
     triggers, metrics = run_funnel_job()
     benchmark_context = metrics.get("benchmark_context", {}) or {}
     name_map = _stock_name_map()
+    sector_map = fetch_sector_map()
 
     code_to_reasons: dict[str, list[str]] = {}
     code_to_best_score: dict[str, float] = {}
@@ -1294,6 +1318,8 @@ def run(webhook_url: str) -> tuple[bool, list[dict], dict]:
     l2_dry_vol  = int(metrics.get("layer2_dry_vol", 0) or 0)
     l2_rs_div   = int(metrics.get("layer2_rs_div", 0) or 0)
     l2_sos      = int(metrics.get("layer2_sos", 0) or 0)
+    sector_rotation = metrics.get("sector_rotation", {}) or {}
+    sector_rotation_map = sector_rotation.get("state_map", {}) or {}
     markup_count = len(markup_symbols)
     accum_a_count = sum(1 for v in accum_stage_map.values() if v == "Accum_A")
     accum_b_count = sum(1 for v in accum_stage_map.values() if v == "Accum_B")
@@ -1381,6 +1407,7 @@ def run(webhook_url: str) -> tuple[bool, list[dict], dict]:
         ),
         f"- **大盘水温**：{bench_line}",
         f"- **Top 行业**：{', '.join(metrics['top_sectors']) if metrics['top_sectors'] else '无'}",
+        f"- **板块轮动温度计**：{sector_rotation.get('headline', '无')}",
         f"- **数据质量**：{data_quality_line}",
         "",
         "## 漏斗进度",
@@ -1393,6 +1420,7 @@ def run(webhook_url: str) -> tuple[bool, list[dict], dict]:
         "## L2 通道与阶段",
         f"- **L2 通道分布**：主升{l2_momentum} | 潜伏{l2_ambush} | 吸筹{l2_accum} | 地量{l2_dry_vol} | 护盘{l2_rs_div} | 点火{l2_sos}",
         f"- **威科夫阶段**：Markup{markup_count} | Accum_A{accum_a_count} | Accum_B{accum_b_count} | Accum_C{accum_c_count}",
+        f"- **板块轮动状态**：分歧{int((sector_rotation.get('counts', {}) or {}).get('DISAGREEMENT_PULLBACK', 0))} | 健康{int((sector_rotation.get('counts', {}) or {}).get('HEALTHY_MAINLINE', 0))} | 高潮{int((sector_rotation.get('counts', {}) or {}).get('CONSENSUS_CLIMAX', 0))} | 退潮{int((sector_rotation.get('counts', {}) or {}).get('DISTRIBUTION_RISK', 0))}",
         "",
         "## L4 形态触发",
         f"- **SOS（量价点火）**：{len(sos_hit_set)}",
@@ -1413,6 +1441,10 @@ def run(webhook_url: str) -> tuple[bool, list[dict], dict]:
         f"- **高优先级候选**：{top_priority_count} 只",
         f"- **AI 输入通道分布**：{ai_channel_summary}",
     ]
+    rotation_overview_lines = sector_rotation.get("overview_lines", []) or []
+    if rotation_overview_lines:
+        lines.extend(["", "## 板块轮动水温计"])
+        lines.extend([f"- {x}" for x in rotation_overview_lines])
 
     def _append_ai_section(
         lines_obj: list[str], section_title: str, section_desc: str, codes: list[str]
@@ -1433,12 +1465,21 @@ def run(webhook_url: str) -> tuple[bool, list[dict], dict]:
             name = name_map.get(code, code)
             trigger_reason = "、".join(code_to_reasons.get(code, []))
             channel = str(l2_channel_map.get(code, "")).strip()
+            industry = str(sector_map.get(code, "") or "未知行业")
+            sector_info = sector_rotation_map.get(industry, {}) or {}
+            sector_state_label = str(
+                sector_info.get("label", SECTOR_STATE_LABELS.get("NEUTRAL_MIXED", "中性混沌"))
+            ).strip()
             stage = accum_stage_map.get(code, "")
             if not stage and code in markup_symbols:
                 stage = "Markup"
             stage_str = f"[{stage}]" if stage else ""
             base_reason = trigger_reason or "威科夫候选"
-            reasons = f"{channel} | {base_reason}" if channel else base_reason
+            sector_reason = f"板块:{sector_state_label}"
+            if channel:
+                reasons = f"{channel} | {sector_reason} | {base_reason}"
+            else:
+                reasons = f"{sector_reason} | {base_reason}"
 
             exit_sig = exit_signals.get(code, {})
             exit_str = ""
@@ -1496,6 +1537,22 @@ def run(webhook_url: str) -> tuple[bool, list[dict], dict]:
             ),
             "stage": _stage_name(c),
             "score": float(l3_score_map.get(c, 0.0)),
+            "industry": str(sector_map.get(c, "") or "未知行业"),
+            "sector_state_code": str(
+                (sector_rotation_map.get(str(sector_map.get(c, "") or "未知行业"), {}) or {}).get("state", "")
+            ).strip(),
+            "sector_state": str(
+                (sector_rotation_map.get(str(sector_map.get(c, "") or "未知行业"), {}) or {}).get(
+                    "label",
+                    "",
+                )
+            ).strip(),
+            "sector_note": str(
+                (sector_rotation_map.get(str(sector_map.get(c, "") or "未知行业"), {}) or {}).get("note", "")
+            ).strip(),
+            "sector_guidance": str(
+                (sector_rotation_map.get(str(sector_map.get(c, "") or "未知行业"), {}) or {}).get("guidance", "")
+            ).strip(),
             "exit_signal": str((exit_signals.get(c, {}) or {}).get("signal", "")).strip(),
             "exit_price": (exit_signals.get(c, {}) or {}).get("price"),
             "exit_reason": str((exit_signals.get(c, {}) or {}).get("reason", "")).strip(),
