@@ -1134,6 +1134,7 @@ def run(
     # P2: RAG 防雷（负面新闻关键词 veto）
     # 注意：RAG 永远在压缩/硬上限之后执行，确保筛查集合最多为 STEP3_MAX_AI_INPUT。
     rag_veto_lines: list[str] = []
+    rag_veto_preview = ""
     if STEP3_ENABLE_RAG_VETO and is_rag_veto_enabled() and not selected_df.empty:
         rag_inputs = [
             {"code": str(r.get("code", "")).strip(), "name": str(r.get("name", ""))}
@@ -1161,6 +1162,11 @@ def run(
             before_n = len(selected_df)
             selected_df = selected_df[~selected_df["code"].astype(str).isin(set(vetoed_codes))].reset_index(drop=True)
             print(f"[step3][rag] 负面新闻 veto: {before_n} -> {len(selected_df)}（剔除{len(vetoed_codes)}）")
+            rag_veto_preview = (
+                "## 🛑 RAG 防雷已剔除（前置）\n"
+                + "\n".join(rag_veto_lines)
+                + "\n\n---\n"
+            )
         else:
             print("[step3][rag] 未命中负面关键词，保持候选不变")
     else:
@@ -1179,7 +1185,7 @@ def run(
             "- 无（风险过高，今日保持观望）"
         )
         if rag_veto_lines:
-            report += "\n\n## 🛑 RAG 防雷剔除清单\n" + "\n".join(rag_veto_lines)
+            report = rag_veto_preview + report + "\n\n## 🛑 RAG 防雷剔除清单\n" + "\n".join(rag_veto_lines)
         model_banner = f"🤖 模型: {model}"
         content = f"{model_banner}\n\n{report}"
         title = f"📄 批量研报 {date.today().strftime('%Y-%m-%d')}"
@@ -1368,7 +1374,7 @@ def run(
         + "\n\n---\n"
     )
 
-    content = f"{model_banner}\n\n{ops_preview}\n{report}"
+    content = f"{model_banner}\n\n{rag_veto_preview}{ops_preview}\n{report}"
     if rag_veto_lines:
         content += "\n\n## 🛑 RAG 防雷剔除清单\n" + "\n".join(rag_veto_lines)
     print(f"[step3] 飞书发送原文长度={len(content)}（不压缩，交由飞书分片）")

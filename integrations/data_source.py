@@ -23,6 +23,7 @@ from datetime import date
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Literal
+from http.client import RemoteDisconnected
 
 import pandas as pd
 
@@ -45,9 +46,11 @@ _DATA_SOURCE_DEBUG = os.getenv("DATA_SOURCE_DEBUG", "").strip().lower() in {
     "yes",
     "on",
 }
-_BAOSTOCK_MAX_SECONDS = float(os.getenv("BAOSTOCK_MAX_SECONDS", "2.0"))
+_BAOSTOCK_MAX_SECONDS = float(os.getenv("BAOSTOCK_MAX_SECONDS", "6.0"))
 _BAOSTOCK_SOCKET_TIMEOUT = float(os.getenv("BAOSTOCK_SOCKET_TIMEOUT", "3.0"))
 _BAOSTOCK_CIRCUIT_THRESHOLD = int(os.getenv("BAOSTOCK_CIRCUIT_THRESHOLD", "10"))
+_AKSHARE_RETRY_TIMES = max(int(os.getenv("AKSHARE_RETRY_TIMES", "2")), 1)
+_AKSHARE_RETRY_SLEEP_SECONDS = float(os.getenv("AKSHARE_RETRY_SLEEP_SECONDS", "0.8"))
 _BAOSTOCK_CONSEC_FAILS = 0
 _BAOSTOCK_CIRCUIT_OPEN = False
 _BAOSTOCK_CIRCUIT_NOTE = ""
@@ -117,7 +120,25 @@ def _network_hint_from_details(details: list[str]) -> str:
         return "疑似 DNS/网络异常，请检查代理、DNS、系统防火墙或公司网络策略。"
     if any(k in blob for k in ssl_markers):
         return "疑似 SSL/证书链异常，请检查系统证书与 Python requests/certifi 环境。"
+    if "remotedisconnected" in blob or "remote end closed connection" in blob:
+        return "疑似上游行情源瞬时断连，可稍后重试；服务端已支持自动重试。"
+    if "permission denied" in blob and "efinance" in blob:
+        return "部署环境对 site-packages 为只读，efinance 本地缓存写入失败；建议依赖 tushare/akshare/baostock 或启用兼容修复。"
     return ""
+
+
+def _is_retryable_akshare_error(err: Exception) -> bool:
+    text = _compact_error(err).lower()
+    markers = [
+        "remotedisconnected",
+        "remote end closed connection",
+        "connection aborted",
+        "connection reset",
+        "read timed out",
+        "connecttimeout",
+        "proxyerror",
+    ]
+    return any(m in text for m in markers) or isinstance(err, RemoteDisconnected)
 
 
 def _to_ts_code(symbol: str) -> str:
@@ -442,7 +463,33 @@ def _ensure_baostock_login():
 
 
 def _fetch_stock_efinance(symbol: str, start: str, end: str) -> pd.DataFrame:
-    import efinance as ef
+    # Streamlit Cloud / 只读部署环境下，efinance 在 import 阶段会尝试写 site-packages/efinance/data。
+    # 这里做一次兼容导入：临时忽略该 mkdir 的 PermissionError，随后把缓存目录重定向到 /tmp。
+    import pathlib
+    import tempfile
+
+    orig_mkdir = pathlib.Path.mkdir
+
+    def _patched_mkdir(self, *args, **kwargs):
+        try:
+            return orig_mkdir(self, *args, **kwargs)
+        except PermissionError:
+            path_text = str(self)
+            if "site-packages" in path_text and "efinance" in path_text and "data" in path_text:
+                return None
+            raise
+
+    pathlib.Path.mkdir = _patched_mkdir
+    try:
+        import efinance as ef
+        import efinance.config as ef_cfg
+    finally:
+        pathlib.Path.mkdir = orig_mkdir
+
+    cache_dir = Path(tempfile.gettempdir()) / "efinance-cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    ef_cfg.DATA_DIR = cache_dir
+    ef_cfg.SEARCH_RESULT_CACHE_PATH = str(cache_dir / "search-cache.json")
 
     # fqt: 0 不复权, 1 前复权, 2 后复权
     fqt = 1  # 默认前复权
@@ -629,18 +676,27 @@ def fetch_stock_hist(
         failed_sources.append("akshare(disabled)")
         failed_details.append("akshare=disabled_by_env")
     else:
-        try:
-            return _tag_source(
-                _fetch_stock_akshare(symbol, start_s, end_s, adjust), "akshare"
-            )
-        except ModuleNotFoundError as e:
-            _debug_source_fail("akshare", e)
-            failed_sources.append(f"akshare(缺少依赖 {e.name})")
-            failed_details.append(f"akshare={_compact_error(e)}")
-        except Exception as e:
-            _debug_source_fail("akshare", e)
-            failed_sources.append("akshare")
-            failed_details.append(f"akshare={_compact_error(e)}")
+        last_akshare_err: Exception | None = None
+        for attempt in range(1, _AKSHARE_RETRY_TIMES + 1):
+            try:
+                return _tag_source(
+                    _fetch_stock_akshare(symbol, start_s, end_s, adjust), "akshare"
+                )
+            except ModuleNotFoundError as e:
+                _debug_source_fail("akshare", e)
+                failed_sources.append(f"akshare(缺少依赖 {e.name})")
+                failed_details.append(f"akshare={_compact_error(e)}")
+                last_akshare_err = e
+                break
+            except Exception as e:
+                last_akshare_err = e
+                _debug_source_fail("akshare", e)
+                if attempt < _AKSHARE_RETRY_TIMES and _is_retryable_akshare_error(e):
+                    time.sleep(max(_AKSHARE_RETRY_SLEEP_SECONDS, 0.0))
+                    continue
+                failed_sources.append("akshare")
+                failed_details.append(f"akshare={_compact_error(e)}")
+                break
 
     # 3. baostock (仅前复权)
     baostock_circuit_open, baostock_circuit_note = _baostock_circuit_state()

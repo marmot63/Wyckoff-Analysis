@@ -364,7 +364,6 @@ def _run_analysis(symbol, image_file, provider, model, api_key):
                 from utils.feishu import send_feishu_notification
                 send_feishu_notification(st.session_state.feishu_webhook, f"AI 深度研报 (单股 - {symbol})", response_text)
             except Exception as e:
-                import traceback
                 traceback.print_exc()
                 st.toast(f"飞书推送失败: {e}", icon="⚠️")
 
@@ -394,5 +393,4 @@ def _run_analysis(symbol, image_file, provider, model, api_key):
             st.error(msg)
         else:
             st.error(f"分析过程中发生错误：{e}")
-        st.expander("错误详情").text(traceback.format_exc())
         st.expander("错误详情").text(traceback.format_exc())

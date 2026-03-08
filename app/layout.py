@@ -1,8 +1,10 @@
+import html
+
 import streamlit as st
 
 from app.auth_component import check_auth, login_form
 from core.token_storage import restore_tokens_from_storage
-
+from integrations.supabase_market_signal import compose_market_banner, load_latest_market_signal_daily
 
 def _set_default(key: str, value) -> None:
     if key not in st.session_state or st.session_state.get(key) is None:
@@ -107,7 +109,290 @@ h1, h2, h3 {
 [data-testid="stDataEditor"] [role="gridcell"] {
   line-height: 1.35;
 }
+
+.market-signal-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.8rem 1rem 0.85rem;
+  margin: 0.2rem 0 1rem;
+  border-radius: 16px;
+  border: 1px solid #e7eaf0;
+  background: linear-gradient(180deg, #fbfcfe 0%, #f7f9fc 100%);
+}
+
+.market-signal-banner .ms-top {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.market-signal-banner .ms-left {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  min-width: 0;
+}
+
+.market-signal-banner .ms-title {
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: #1f2937;
+  line-height: 1.35;
+}
+
+.market-signal-banner .ms-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 60px;
+  padding: 0.22rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.market-signal-banner .ms-tag-severe {
+  background: #fde8e8;
+  color: #b42318;
+}
+
+.market-signal-banner .ms-tag-conservative {
+  background: #fff1e6;
+  color: #c4320a;
+}
+
+.market-signal-banner .ms-tag-cautious {
+  background: #f2f4f7;
+  color: #475467;
+}
+
+.market-signal-banner .ms-tag-cautious-positive {
+  background: #ecfdf3;
+  color: #027a48;
+}
+
+.market-signal-banner .ms-tag-positive {
+  background: #e6f4ea;
+  color: #166534;
+}
+
+.market-signal-banner .ms-chips {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.market-signal-banner .ms-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  background: #ffffff;
+  border: 1px solid #e6e9f0;
+  color: #344054;
+  font-size: 0.78rem;
+  line-height: 1.25;
+  transition: color 120ms ease;
+}
+
+.market-signal-banner .ms-chip-label {
+  color: #667085;
+  font-size: 0.78rem;
+}
+
+.market-signal-banner .ms-chip-value {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.86rem;
+}
+
+.market-signal-banner .ms-chip-positive {
+  color: #c43221;
+}
+
+.market-signal-banner .ms-chip-positive .ms-chip-label {
+  color: #e04f39;
+}
+
+.market-signal-banner .ms-chip-neutral {
+  color: #475467;
+}
+
+.market-signal-banner .ms-chip-neutral .ms-chip-label {
+  color: #667085;
+}
+
+.market-signal-banner .ms-chip-caution {
+  color: #c2410c;
+}
+
+.market-signal-banner .ms-chip-caution .ms-chip-label {
+  color: #ea580c;
+}
+
+.market-signal-banner .ms-chip-negative {
+  color: #067647;
+}
+
+.market-signal-banner .ms-chip-negative .ms-chip-label {
+  color: #039855;
+}
+
+.market-signal-banner .ms-body {
+  color: #475467;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+@media (max-width: 768px) {
+  .market-signal-banner {
+    padding: 0.75rem 0.85rem 0.8rem;
+  }
+  .market-signal-banner .ms-title {
+    font-size: 0.92rem;
+  }
+  .market-signal-banner .ms-body {
+    font-size: 0.86rem;
+  }
+}
 </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _tone_slug(tone: str) -> str:
+    mapping = {
+        "恶劣": "severe",
+        "保守": "conservative",
+        "谨慎": "cautious",
+        "谨慎乐观": "cautious-positive",
+        "乐观": "positive",
+    }
+    return mapping.get(str(tone or "").strip(), "cautious")
+
+
+def _benchmark_regime_cn(regime: str) -> str:
+    mapping = {
+        "RISK_ON": "偏强",
+        "NEUTRAL": "中性",
+        "RISK_OFF": "偏弱",
+        "CRASH": "极弱",
+        "BLACK_SWAN": "恶劣",
+    }
+    return mapping.get(str(regime or "").strip().upper(), "待确认")
+
+
+def _benchmark_chip_tone(regime: str) -> str:
+    normalized = str(regime or "").strip().upper()
+    if normalized == "RISK_ON":
+        return "positive"
+    if normalized == "NEUTRAL":
+        return "neutral"
+    if normalized == "RISK_OFF":
+        return "caution"
+    if normalized in {"CRASH", "BLACK_SWAN"}:
+        return "negative"
+    return "neutral"
+
+
+def _signed_chip_tone(raw) -> str:
+    try:
+        if raw is None or str(raw).strip() == "":
+            return "neutral"
+        value = float(raw)
+    except Exception:
+        return "neutral"
+    if value > 0:
+        return "positive"
+    if value < 0:
+        return "negative"
+    return "neutral"
+
+
+def _vix_chip_tone(raw) -> str:
+    try:
+        if raw is None or str(raw).strip() == "":
+            return "neutral"
+        value = float(raw)
+    except Exception:
+        return "neutral"
+    if value >= 15:
+        return "negative"
+    if value >= 8:
+        return "caution"
+    if value > 0:
+        return "caution"
+    if value < 0:
+        return "positive"
+    return "neutral"
+
+
+def _render_market_signal_banner() -> None:
+    row = load_latest_market_signal_daily()
+    if not isinstance(row, dict):
+        return
+
+    banner = compose_market_banner(row)
+    tone = str(banner.get("banner_tone", "谨慎") or "谨慎").strip()
+    title = str(banner.get("banner_title", "") or "").strip()
+    body = str(banner.get("banner_message", "") or "").strip()
+    benchmark_regime_raw = str(row.get("benchmark_regime", "") or "")
+    regime = _benchmark_regime_cn(benchmark_regime_raw)
+    main_close = row.get("main_index_close")
+    a50_close = row.get("a50_close")
+    a50_pct = row.get("a50_pct_chg")
+    vix_close = row.get("vix_close")
+    vix_pct = row.get("vix_pct_chg")
+
+    def _fmt_pct(raw) -> str:
+        try:
+            if raw is None or str(raw).strip() == "":
+                return "--"
+            return f"{float(raw):+.2f}%"
+        except Exception:
+            return "--"
+
+    def _fmt_plain(raw) -> str:
+        try:
+            if raw is None or str(raw).strip() == "":
+                return "--"
+            return f"{float(raw):.2f}"
+        except Exception:
+            return "--"
+
+    chips = [
+        ("大盘水温（上证）", f"{regime} {_fmt_plain(main_close)}", _benchmark_chip_tone(benchmark_regime_raw)),
+        ("A50（盘前风向标）", f"{_fmt_plain(a50_close)} / {_fmt_pct(a50_pct)}", _signed_chip_tone(a50_pct)),
+        ("VIX（恐慌指数）", f"{_fmt_plain(vix_close)} / {_fmt_pct(vix_pct)}", _vix_chip_tone(vix_pct)),
+    ]
+    chips_html = "".join(
+        (
+            f'<span class="ms-chip ms-chip-{html.escape(chip_tone)}">'
+            f'<span class="ms-chip-label">{html.escape(label)}</span>'
+            f'<span class="ms-chip-value">{html.escape(value)}</span>'
+            "</span>"
+        )
+        for label, value, chip_tone in chips
+    )
+    st.markdown(
+        f"""
+<div class="market-signal-banner">
+  <div class="ms-top">
+    <div class="ms-left">
+      <span class="ms-tag ms-tag-{_tone_slug(tone)}">{html.escape(tone)}</span>
+      <div class="ms-title">{html.escape(title or "亲爱的投资者，最新交易日市场信号已更新。")}</div>
+    </div>
+    <div class="ms-chips">{chips_html}</div>
+  </div>
+  <div class="ms-body">{html.escape(body)}</div>
+</div>
         """,
         unsafe_allow_html=True,
     )
@@ -134,6 +419,7 @@ def setup_page(
     _inject_base_ui_css()
     if require_login:
         require_auth()
+        _render_market_signal_banner()
 
 
 def is_data_source_failure_message(msg: str) -> bool:

@@ -17,6 +17,10 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from integrations.fetch_a_share_csv import _resolve_trading_window
+from integrations.supabase_market_signal import upsert_market_signal_daily
+from utils.trading_clock import resolve_end_calendar_day
+
 TZ = ZoneInfo("Asia/Shanghai")
 STEP3_REASON_MAP = {
     "data_all_failed": "OHLCV 全部拉取失败",
@@ -49,6 +53,43 @@ def _log(msg: str, logs_path: str | None = None) -> None:
         os.makedirs(os.path.dirname(logs_path) or ".", exist_ok=True)
         with open(logs_path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
+
+
+def _latest_trade_date_str() -> str:
+    window = _resolve_trading_window(
+        end_calendar_day=resolve_end_calendar_day(),
+        trading_days=30,
+    )
+    return window.end_trade_date.isoformat()
+
+
+def _persist_benchmark_context(benchmark_context: dict, logs_path: str | None = None) -> None:
+    if not benchmark_context:
+        return
+    trade_date = _latest_trade_date_str()
+    payload = {
+        "benchmark_regime": str(benchmark_context.get("regime", "") or "").strip().upper() or None,
+        "main_index_code": str(benchmark_context.get("main_code", "000001") or "000001").strip(),
+        "main_index_close": benchmark_context.get("close"),
+        "main_index_ma50": benchmark_context.get("ma50"),
+        "main_index_ma200": benchmark_context.get("ma200"),
+        "main_index_recent3_cum_pct": benchmark_context.get("recent3_cum_pct"),
+        "main_index_today_pct": benchmark_context.get("main_today_pct"),
+        "smallcap_index_code": str(benchmark_context.get("smallcap_code", "") or "").strip() or None,
+        "smallcap_close": benchmark_context.get("smallcap_close"),
+        "smallcap_recent3_cum_pct": benchmark_context.get("smallcap_recent3_cum_pct"),
+        "source_jobs": {
+            "daily_job": {
+                "updated_at": datetime.now(TZ).isoformat(),
+                "writer": "step2_benchmark_context",
+            }
+        },
+    }
+    ok = upsert_market_signal_daily(trade_date, payload)
+    _log(
+        f"市场信号写库(benchmark): ok={ok}, trade_date={trade_date}, regime={payload.get('benchmark_regime')}",
+        logs_path,
+    )
 
 
 def _load_step4_target() -> tuple[dict | None, str]:
@@ -142,6 +183,8 @@ def main() -> int:
     _log(f"阶段 1 Wyckoff Funnel: ok={step2_ok}, symbols={len(symbols_info)}, elapsed={elapsed2:.1f}s, err={step2_err}", logs_path)
     if step2_err:
         has_blocking_failure = True
+    elif benchmark_context:
+        _persist_benchmark_context(benchmark_context, logs_path)
 
     # 阶段 2：批量研报（可降级：失败不影响 Funnel 成功）
     step3_ok = True

@@ -21,12 +21,16 @@ import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from integrations.fetch_a_share_csv import _resolve_trading_window
+from integrations.supabase_market_signal import upsert_market_signal_daily
 from utils.feishu import send_feishu_notification
+from utils.trading_clock import resolve_end_calendar_day
 
 TZ = ZoneInfo("Asia/Shanghai")
 RISK_A50_CRASH_PCT = float(os.getenv("PREMARKET_A50_CRASH_PCT", "-2.0"))
 RISK_A50_OFF_PCT = float(os.getenv("PREMARKET_A50_RISK_OFF_PCT", "-1.0"))
 RISK_VIX_CRASH_PCT = float(os.getenv("PREMARKET_VIX_CRASH_PCT", "15.0"))
+RISK_VIX_CRASH_CLOSE = float(os.getenv("PREMARKET_VIX_CRASH_CLOSE", "25.0"))
 RISK_VIX_OFF_PCT = float(os.getenv("PREMARKET_VIX_RISK_OFF_PCT", "8.0"))
 
 
@@ -41,6 +45,17 @@ def _build_action_matrix(regime: str) -> list[str]:
             "- ⛔ `LIGHT_ADD`：禁止",
             "- ⛔ `PROBE`：禁止",
             "- ⛔ `ATTACK`：禁止",
+            "- ⛔ `FULL_ATTACK`：禁止",
+        ]
+    if regime == "CAUTION":
+        return [
+            "🟠 **盘前动作开关**（CAUTION）",
+            "- ✅ `EXIT`：允许",
+            "- ✅ `TRIM`：允许",
+            "- ✅ `HOLD`：允许（保持防守纪律）",
+            "- ⚠️ `LIGHT_ADD`：仅允许对**已有强势浮盈仓位**小幅加仓",
+            "- ✅ `PROBE`：允许（仅小仓位试探，盘中需二次确认）",
+            "- ⛔ `ATTACK`：默认禁止",
             "- ⛔ `FULL_ATTACK`：禁止",
         ]
     if regime == "RISK_OFF":
@@ -89,6 +104,14 @@ def _safe_float(v) -> float | None:
         return float(s)
     except Exception:
         return None
+
+
+def _latest_trade_date_str() -> str:
+    window = _resolve_trading_window(
+        end_calendar_day=resolve_end_calendar_day(),
+        trading_days=30,
+    )
+    return window.end_trade_date.isoformat()
 
 
 def _fetch_a50() -> dict:
@@ -312,26 +335,55 @@ def _fetch_vix() -> dict:
 
 
 def _judge_regime(a50: dict, vix: dict) -> tuple[str, list[str]]:
+    severity_rank = {
+        "NORMAL": 0,
+        "CAUTION": 1,
+        "RISK_OFF": 2,
+        "BLACK_SWAN": 3,
+    }
+
+    def _escalate(current: str, target: str) -> str:
+        return target if severity_rank.get(target, 0) > severity_rank.get(current, 0) else current
+
     reasons: list[str] = []
     regime = "NORMAL"
 
     a50_pct = _safe_float(a50.get("pct_chg"))
+    vix_close = _safe_float(vix.get("close"))
     vix_pct = _safe_float(vix.get("pct_chg"))
 
     if a50_pct is not None and a50_pct <= RISK_A50_CRASH_PCT:
-        regime = "BLACK_SWAN"
+        regime = _escalate(regime, "BLACK_SWAN")
         reasons.append(f"A50跌幅 {a50_pct:.2f}% <= {RISK_A50_CRASH_PCT:.2f}%")
     if vix_pct is not None and vix_pct >= RISK_VIX_CRASH_PCT:
-        regime = "BLACK_SWAN"
-        reasons.append(f"VIX涨幅 {vix_pct:.2f}% >= {RISK_VIX_CRASH_PCT:.2f}%")
+        if vix_close is not None and vix_close >= RISK_VIX_CRASH_CLOSE:
+            regime = _escalate(regime, "BLACK_SWAN")
+            reasons.append(
+                f"VIX绝对值 {vix_close:.2f} >= {RISK_VIX_CRASH_CLOSE:.2f} 且涨幅 {vix_pct:.2f}% >= {RISK_VIX_CRASH_PCT:.2f}%"
+            )
+        else:
+            regime = _escalate(regime, "CAUTION")
+            if vix_close is None:
+                reasons.append(
+                    f"VIX涨幅 {vix_pct:.2f}% >= {RISK_VIX_CRASH_PCT:.2f}%（绝对值缺失，按 CAUTION 处理）"
+                )
+            else:
+                reasons.append(
+                    f"VIX涨幅 {vix_pct:.2f}% >= {RISK_VIX_CRASH_PCT:.2f}% 但绝对值 {vix_close:.2f} < {RISK_VIX_CRASH_CLOSE:.2f}，按 CAUTION 处理"
+                )
 
     if regime != "BLACK_SWAN":
         if a50_pct is not None and a50_pct <= RISK_A50_OFF_PCT:
-            regime = "RISK_OFF"
+            regime = _escalate(regime, "RISK_OFF")
             reasons.append(f"A50跌幅 {a50_pct:.2f}% <= {RISK_A50_OFF_PCT:.2f}%")
         if vix_pct is not None and vix_pct >= RISK_VIX_OFF_PCT:
-            regime = "RISK_OFF"
-            reasons.append(f"VIX涨幅 {vix_pct:.2f}% >= {RISK_VIX_OFF_PCT:.2f}%")
+            is_vix_caution_case = (
+                vix_pct >= RISK_VIX_CRASH_PCT
+                and (vix_close is None or vix_close < RISK_VIX_CRASH_CLOSE)
+            )
+            if not is_vix_caution_case:
+                regime = _escalate(regime, "RISK_OFF")
+                reasons.append(f"VIX涨幅 {vix_pct:.2f}% >= {RISK_VIX_OFF_PCT:.2f}%")
 
     if not reasons:
         reasons.append("A50/VIX 未触发风险阈值")
@@ -384,6 +436,30 @@ def main() -> int:
     if args.dry_run:
         _log("--dry-run: 不发送飞书", logs_path)
         return 0
+
+    trade_date = _latest_trade_date_str()
+    db_ok = upsert_market_signal_daily(
+        trade_date,
+        {
+            "a50_value_date": a50.get("date"),
+            "a50_source": a50.get("source"),
+            "a50_close": a50.get("close"),
+            "a50_pct_chg": a50.get("pct_chg"),
+            "vix_value_date": vix.get("date"),
+            "vix_source": vix.get("source"),
+            "vix_close": vix.get("close"),
+            "vix_pct_chg": vix.get("pct_chg"),
+            "premarket_regime": regime,
+            "premarket_reasons": reasons,
+            "source_jobs": {
+                "premarket_risk_job": {
+                    "updated_at": datetime.now(TZ).isoformat(),
+                    "writer": "a50_vix_risk",
+                }
+            },
+        },
+    )
+    _log(f"市场信号写库(premarket): ok={db_ok}, trade_date={trade_date}, regime={regime}", logs_path)
 
     if not webhook:
         _log("FEISHU_WEBHOOK_URL 未配置，跳过飞书发送", logs_path)
