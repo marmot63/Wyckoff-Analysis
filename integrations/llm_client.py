@@ -11,9 +11,8 @@ from typing import Optional
 # 首期仅实现 Gemini；后续可增加 openai
 SUPPORTED_PROVIDERS = ("gemini",)
 GEMINI_MODELS = (
+    "gemini-3.1-flash-lite-preview",
     "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-3.1-pro-preview",
     "gemini-3-pro-preview",
     "gemini-3-flash-preview"
 )
@@ -48,7 +47,7 @@ def call_llm(
 
     Args:
         provider: 供应商，当前仅支持 "gemini"。
-        model: 模型名，如 gemini-2.5-flash-lite。
+        model: 模型名，如 gemini-3.1-flash-lite-preview。
         api_key: 对应供应商的 API Key。
         system_prompt: 系统提示词（Alpha 投委会等）。
         user_message: 用户消息（拼装好的 OHLCV 等）。

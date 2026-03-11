@@ -149,7 +149,7 @@ def _resolve_model_credentials(payload: dict[str, Any]) -> tuple[str, str]:
     if not api_key:
         api_key = str(os.getenv("GEMINI_API_KEY", "") or "").strip()
     if not model:
-        model = str(os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite") or "").strip()
+        model = str(os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview") or "").strip()
     if not api_key:
         raise ValueError("未找到可用的 Gemini API Key（用户配置与环境变量均为空）")
     return api_key, model

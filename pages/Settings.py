@@ -98,8 +98,8 @@ with content_col:
             new_gemini_model = st.text_input(
                 "Gemini 模型",
                 value=st.session_state.gemini_model,
-                placeholder="gemini-2.5-flash-lite",
-                help="如 gemini-2.5-flash-lite、gemini-2.5-flash 等",
+                placeholder="gemini-3.1-flash-lite-preview",
+                help="如 gemini-3.1-flash-lite-preview、gemini-2.5-flash 等",
             )
 
             if st.button("💾 保存 AI 配置", key="save_ai"):

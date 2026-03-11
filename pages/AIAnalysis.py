@@ -107,7 +107,7 @@ with content_col:
         default_model = (
             st.session_state.get("ai_model")
             or st.session_state.get("gemini_model")
-            or "gemini-2.5-flash-lite"
+            or "gemini-3.1-flash-lite-preview"
         )
         model = st.text_input(
             "模型",
@@ -134,7 +134,7 @@ with content_col:
     )
     model_override = st.text_input(
         "后台模型覆盖（可留空）",
-        value=str(st.session_state.get("gemini_model") or "gemini-2.5-flash-lite"),
+        value=str(st.session_state.get("gemini_model") or "gemini-3.1-flash-lite-preview"),
         help="留空则优先使用你在设置页保存的 Gemini 模型。",
     ).strip()
     preview_only = st.checkbox("仅生成输入预演，不真正调用模型", value=False)

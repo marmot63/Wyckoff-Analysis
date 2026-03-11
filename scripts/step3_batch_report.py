@@ -32,7 +32,7 @@ from core.wyckoff_engine import fit_ai_candidate_quotas, normalize_hist_from_fet
 from core.sector_rotation import SECTOR_STATE_LABELS
 
 TRADING_DAYS = 500
-GEMINI_MODEL_FALLBACK = "gemini-2.5-flash-lite"
+GEMINI_MODEL_FALLBACK = "gemini-3.1-flash-lite-preview"
 STEP3_MAX_AI_INPUT = int(os.getenv("STEP3_MAX_AI_INPUT", "0"))
 STEP3_DEFAULT_CONTEXT_CAP = max(int(os.getenv("STEP3_DEFAULT_CONTEXT_CAP", "8")), 0)
 STEP3_MAX_PER_INDUSTRY = int(os.getenv("STEP3_MAX_PER_INDUSTRY", "5"))
