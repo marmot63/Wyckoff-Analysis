@@ -1377,6 +1377,8 @@ def run(
         mock_result,
         l3_ranked_symbols,
         regime,
+        sector_map=sector_map,
+        max_per_sector=2,
     )
     ai_policy = resolve_ai_candidate_policy(regime)
     alloc_elapsed = time.monotonic() - alloc_started

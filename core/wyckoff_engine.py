@@ -1649,6 +1649,8 @@ def allocate_ai_candidates(
     l3_ranked_symbols: list[str],
     regime: str,
     override_total_cap: int = -1,
+    sector_map: dict[str, str] | None = None,
+    max_per_sector: int = 2,
 ) -> tuple[list[str], list[str], dict[str, float]]:
     """
     根据大盘政权和各轨配额，计算优先级得分，输出 (trend_selected, accum_selected, score_map)
@@ -1808,6 +1810,8 @@ def allocate_ai_candidates(
     accum_l3_fill_used = 0
     trend_fill_map = {code: is_fill for code, _, is_fill in trend_candidates_with_score}
     accum_fill_map = {code: is_fill for code, _, is_fill in accum_candidates_with_score}
+    
+    sector_counts: dict[str, int] = {}
 
     def _add_to_selected(code: str, track_name: str) -> bool:
         nonlocal trend_l3_fill_used, accum_l3_fill_used
@@ -1815,6 +1819,13 @@ def allocate_ai_candidates(
             return False
         if code in selected_seen:
             return False
+        
+        sector = ""
+        if sector_map and max_per_sector > 0:
+            sector = sector_map.get(code, "").strip()
+            if sector and sector_counts.get(sector, 0) >= max_per_sector:
+                return False
+
         if track_name == "Trend":
             if trend_fill_map.get(code, False) and trend_l3_fill_used >= max_trend_l3_fill:
                 return False
@@ -1831,6 +1842,9 @@ def allocate_ai_candidates(
             accum_selected.append(code)
             if accum_fill_map.get(code, False):
                 accum_l3_fill_used += 1
+                
+        if sector:
+            sector_counts[sector] = sector_counts.get(sector, 0) + 1
         selected_seen.add(code)
         return True
 
