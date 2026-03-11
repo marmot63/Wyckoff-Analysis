@@ -1,6 +1,6 @@
 # A 股选股与行情工具
 
-> 每天从全市场多层筛选出高弹性标的，由「Alpha 全栈虚拟投委会」出具**三阵营研报（逻辑破产/储备营地/处于起跳板）**；涵盖量化风控、状态签名防重传机制与个人持仓管理。
+> 每天从全市场多层筛选出高弹性标的，由「Alpha 全栈虚拟投委会」出具**三阵营研报（逻辑破产/储备营地/处于起跳板）**；重计算链路已迁到 GitHub Actions 后台，Streamlit 只负责触发、看状态、读结果。
 
 用 [akshare](https://github.com/akfamily/akshare) + 自研 Wyckoff 漏斗做量化初筛，交由大模型开展多空博弈深度剖析，最后由 OMS 负责执行约束。适合拒绝无脑黑盒、需“白盒逻辑 + 量化防守 + AI参谋预判”的 A 股散户投资者。
 
@@ -14,9 +14,9 @@
 |------|------|
 | 📊 **每日选股** | 配置 GitHub Actions 后，北京时间周日到周四 18:25 自动跑 Wyckoff Funnel，从主板+创业板筛选候选并推送飞书 |
 | 📘 **策略手册** | 见 `README_STRATEGY.md`（含核心量化金融术语、风控公式及各层筛选指标执行口径） |
-| 🔬 **Wyckoff Funnel** | 多层漏斗筛选：剥离垃圾 → 六通道强弱甄别（主升/点火/潜伏/吸筹/地量/护盘）→ Markup 识别 → 威科夫狙击 → AI 双轨分析 |
+| 🔬 **Wyckoff Funnel** | Web 前台提交参数，GitHub Actions 在后台执行多层漏斗筛选：剥离垃圾 → 六通道强弱甄别 → Markup 识别 → 威科夫狙击 → AI 双轨候选 |
 | 🤖 **AI 研报** | 对筛选结果生成三阵营判断（逻辑破产/储备营地/处于起跳板），含结构战区、确认条件及防踏空策略 |
-| 🎓 **AI 分析（大师模式）** | "Alpha"虚拟投委会，七位历史级交易大师人格（利弗莫尔/威科夫/缠论/彼得林奇等）多维分析 |
+| 🎓 **AI 分析（大师模式）** | 单股维持本地轻量分析；批量代码与漏斗候选改为后台研报任务，避免 Streamlit 长时间持有大批量 OHLCV 与模型上下文 |
 | 🕶️ **私人决断** | 结合个人持仓与外部候选，生成 Buy/Hold/Sell 私密指令，并通过 Telegram 单独发送；自动跳过停牌股、验证数据日期对齐，AI 乱出止损价时自动降级为持有 |
 | 🛡️ **RAG 防雷** | 基于新闻检索自动过滤有负面舆情的股票（立案/调查/减持/业绩预亏等） |
 | 🧪 **日线回测** | 轻量回放 Funnel 命中后的 N 日收益，输出胜率/分位数（无需分钟级数据） |
@@ -65,6 +65,7 @@ python -m pip install -r requirements.txt
 ### 3. 运行
 
 **Web 界面（推荐）**：浏览器里查数据、下 CSV。
+单股分析、导出、持仓等轻量交互仍在 Streamlit 进程内执行；Wyckoff Funnel 与批量 AI 研报则通过页面按钮触发 GitHub Actions 后台任务。
 
 ```bash
 streamlit run streamlit_app.py
@@ -84,6 +85,9 @@ python -u -m integrations.fetch_a_share_csv --symbols 000973 600798 601390
 从全市场（主板 + 创业板）多轮过滤，最终输出高胜率的精要标的，经过量化压缩后交由 AI 研判并推送到飞书。  
 水温判断同时参考指数趋势 + 市场广度（站上 MA20 占比），弱市会自动收紧筛选与买入容忍度。
 
+从 `v2.0.0` 起，**Web 端不再本地重算漏斗**。
+Streamlit 页面负责提交股票池和参数，真正的全量取数、漏斗计算、AI 候选整理由 GitHub Actions 后台执行，页面只展示运行状态和轻量结果摘要。
+
 ### 漏斗筛选逻辑（多层）
 
 | 层级 | 名称 | 筛选逻辑 |
@@ -101,6 +105,17 @@ python -u -m integrations.fetch_a_share_csv --symbols 000973 600798 601390
 
 - **定时**：北京时间周日到周四 18:25
 - **手动**：Actions 页面选择 `Wyckoff Funnel` → `Run workflow`
+
+### Web 端后台任务架构
+
+仓库内置专门给 Streamlit 页面使用的后台工作流：`.github/workflows/web_quant_jobs.yml`
+
+- `Wyckoff Funnel` 页面：提交后台漏斗筛选任务
+- `AI 分析` 页面：提交后台批量研报或输入预演任务
+- 页面职责：触发工作流、轮询运行状态、读取 artifact 结果
+- 后台职责：拉全量 OHLCV、跑漏斗、调用模型、产出轻量 JSON 结果
+
+这样做的目的，是把最耗内存、最容易超时的链路从 Streamlit Community Cloud 进程里移走。
 
 ### 配置 GitHub Secrets
 
@@ -123,6 +138,24 @@ python -u -m integrations.fetch_a_share_csv --symbols 000973 600798 601390
 | `SERPAPI_API_KEY` | ❌ | **防雷备用**：Tavily 挂了时自动切换到 Google News (SerpApi)。 |
 
 > **提示**：以上配置只在你需要对应功能时才需填写。最基础运行仅需前 3 项。
+
+### Web 端后台任务所需 Streamlit Secrets
+
+如果你希望在 Streamlit 页面里直接点按钮触发后台漏斗或后台批量 AI，还需要在 Streamlit Secrets 中配置：
+
+| 名称 | 必填 | 说明 |
+|------|------|------|
+| `GITHUB_ACTIONS_TOKEN` | 是 | GitHub API Token，用于触发 `workflow_dispatch` 并读取 Actions 运行结果 artifact |
+| `GITHUB_ACTIONS_REPO_OWNER` | 否 | 默认 `YoungCan-Wang` |
+| `GITHUB_ACTIONS_REPO_NAME` | 否 | 默认 `Wyckoff-Analysis` |
+| `GITHUB_ACTIONS_REF` | 否 | 默认 `main` |
+| `GITHUB_ACTIONS_WORKFLOW_FILE` | 否 | 默认 `web_quant_jobs.yml` |
+| `GITHUB_ACTIONS_ALLOWED_USER_IDS` | 否 | 逗号分隔的用户 ID 白名单；配置后仅白名单账号可在页面里触发后台任务 |
+
+推荐使用**细粒度单仓库 Token**，至少授予：
+
+- `Actions: Read and write`
+- `Contents: Read`
 
 ### 验证
 
@@ -231,6 +264,8 @@ Step4 完全由 GitHub Actions Secrets 驱动：读取 `SUPABASE_USER_ID` 定位
 .
 ├── streamlit_app.py        # Web 入口
 ├── app/                    # UI 组件（layout/auth/navigation）
+│   ├── background_jobs.py  # Streamlit 侧后台任务状态管理
+│   └── ...
 ├── core/                   # 核心策略与领域逻辑
 │   ├── wyckoff_engine.py   # Wyckoff 多层漏斗引擎（六通道L2 + Markup L2.5）
 │   ├── wyckoff_single_prompt.py  # 单股分析 Prompt
@@ -241,6 +276,7 @@ Step4 完全由 GitHub Actions Secrets 驱动：读取 `SUPABASE_USER_ID` 定位
 ├── integrations/           # 数据源/LLM/Supabase 适配层
 │   ├── data_source.py      # 统一数据源（自动降级）
 │   ├── fetch_a_share_csv.py  # CSV 导出模块
+│   ├── github_actions.py  # GitHub Actions 触发与结果查询
 │   ├── llm_client.py      # LLM 客户端
 │   ├── ai_prompts.py      # AI 提示词（Alpha 投委会）
 │   ├── supabase_client.py # Supabase 云端同步
@@ -248,8 +284,8 @@ Step4 完全由 GitHub Actions Secrets 驱动：读取 `SUPABASE_USER_ID` 定位
 │   ├── rag_veto.py        # RAG 防雷模块
 │   └── feishu.py          # 飞书推送
 ├── pages/                  # Streamlit 页面
-│   ├── AIAnalysis.py      # AI 分析（大师模式）
-│   ├── WyckoffScreeners.py # Wyckoff Funnel 筛选页
+│   ├── AIAnalysis.py      # AI 分析（单股本地，批量后台）
+│   ├── WyckoffScreeners.py # Wyckoff Funnel 后台筛选页
 │   ├── Portfolio.py       # 持仓管理
 │   ├── CustomExport.py    # 自定义导出
 │   ├── DownloadHistory.py # 下载历史
@@ -258,6 +294,7 @@ Step4 完全由 GitHub Actions Secrets 驱动：读取 `SUPABASE_USER_ID` 定位
 ├── scripts/
 │   ├── wyckoff_funnel.py  # 定时选股任务
 │   ├── step3_batch_report.py  # AI 研报
+│   ├── web_background_job.py  # Web 后台任务执行入口
 │   ├── step4_rebalancer.py    # 私人决断
 │   ├── premarket_risk_job.py  # 盘前风控预警
 │   ├── daily_job.py      # 日终流水线
@@ -305,7 +342,17 @@ python -m integrations.fetch_a_share_csv --symbol 300364 --adjust qfq
 
 ### AI 分析：Alpha 虚拟投委会
 
-Web 端提供「AI 分析」页面，采用「Alpha」虚拟投委会模式，由七位历史级交易大师人格共同决策：
+Web 端提供「AI 分析」页面，采用「Alpha」虚拟投委会模式，由七位历史级交易大师人格共同决策。
+
+当前执行口径：
+
+- **单股分析**：继续在 Streamlit 内本地执行，适合轻量、即时交互
+- **批量代码分析**：改为 GitHub Actions 后台执行
+- **漏斗候选分析**：先在后台 Funnel 页得到候选，再在 AI 页提交后台批量研报
+
+这样既保留了单股即时性，也把最重的批量 OHLCV 和模型上下文从 Community Cloud 内存里移走。
+
+大师分工如下：
 
 | 大师 | 职责 |
 |------|------|
@@ -350,7 +397,9 @@ tushare → akshare → baostock → efinance
 
 1. Fork 本仓库，克隆到本地
 2. 按上文配置 `.env` 后运行
-3. 部署到 [Streamlit Cloud](https://share.streamlit.io/)：入口选 `streamlit_app.py`，Secrets 配 `SUPABASE_URL`、`SUPABASE_KEY`、`COOKIE_SECRET`
+3. 部署到 [Streamlit Cloud](https://share.streamlit.io/)：入口选 `streamlit_app.py`
+4. 至少配置 `SUPABASE_URL`、`SUPABASE_KEY`、`COOKIE_SECRET`
+5. 若要启用页面内的后台漏斗/后台批量 AI，再额外配置 `GITHUB_ACTIONS_TOKEN`
 
 [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://share.streamlit.io/)
 

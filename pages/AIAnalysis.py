@@ -113,7 +113,7 @@ with content_col:
             "模型",
             value=str(default_model),
             key="ai_model_single",
-            help="单股模式继续走本地直连。",
+            help="单股模式继续走本地轻量分析，不经过后台任务。",
         ).strip()
         api_key = (st.session_state.get("gemini_api_key") or "").strip()
         if not api_key:
@@ -175,7 +175,7 @@ with content_col:
                 "选择要送去后台 AI 的候选",
                 options=list(options.keys()),
                 default=default_labels,
-                help="默认选前 6 个 AI 候选。",
+                help="默认预选前 6 个后台漏斗候选；你也可以自行删减后再提交后台研报。",
             )
             selected_symbols_info = [options[label] for label in picked][:6]
             if selected_symbols_info:

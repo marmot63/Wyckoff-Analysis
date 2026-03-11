@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.0.0 (2026-03-11)
+
+**架构升级：重计算迁出 Streamlit，Web 端进入前后台分离阶段**
+
+- **后台化 Wyckoff Funnel**：`Wyckoff Funnel` 页面不再在 Streamlit Community Cloud 里本地拉全量 OHLCV 和执行漏斗，而是改为前台提交参数、GitHub Actions 后台执行、页面只读轻量结果。
+- **后台化批量 AI 研报**：`AI 分析` 页保留单股本地模式；批量代码分析与漏斗候选分析统一改成后台任务，避免页面进程长时间持有大批量 OHLCV 和大模型上下文。
+- **新增 Web 后台任务工作流**：加入 `web_quant_jobs.yml`、GitHub Actions 触发适配层与结果 artifact 协议，无需额外服务器即可支撑页面内的后台计算。
+- **结果承载改为轻量 artifact**：后台任务统一输出结构化 JSON artifact，页面通过 GitHub API 轮询状态并读取结果，不额外引入新的 Supabase 结果表。
+- **内存与稳定性优化**：Streamlit 端只保留参数输入、运行状态和摘要展示，显著降低 Community Cloud 的内存峰值与超时概率。
+- **文档全面更新**：README、策略手册、页面文案和目录说明统一切换到“前台触发后台任务”的新口径。
+
 ## v1.9.1 (2026-03-10)
 
 **核心量化逻辑 Bug 修复**
