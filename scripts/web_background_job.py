@@ -136,7 +136,7 @@ def _run_funnel_screen(request_id: str, payload: dict[str, Any]) -> dict[str, An
 
 
 def _resolve_model_credentials(payload: dict[str, Any]) -> tuple[str, str, str, str]:
-    from integrations.llm_client import OPENAI_COMPATIBLE_BASE_URLS, SUPPORTED_PROVIDERS
+    from integrations.llm_client import DEFAULT_GEMINI_MODEL, OPENAI_COMPATIBLE_BASE_URLS, SUPPORTED_PROVIDERS
 
     user_id = str(payload.get("user_id", "") or "").strip()
     provider = str(payload.get("provider", "") or "gemini").strip().lower()
@@ -194,7 +194,7 @@ def _resolve_model_credentials(payload: dict[str, Any]) -> tuple[str, str, str, 
     if not model:
         model = str(os.getenv(env_model, "") or "").strip()
     if not model and provider == "gemini":
-        model = str(os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview") or "").strip()
+        model = str(os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL) or "").strip()
     if not base_url:
         base_url = str(os.getenv(env_base_url, "") or "").strip()
     if not base_url:

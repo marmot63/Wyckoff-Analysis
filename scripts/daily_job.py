@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from integrations.fetch_a_share_csv import _resolve_trading_window
-from integrations.llm_client import OPENAI_COMPATIBLE_BASE_URLS
+from integrations.llm_client import DEFAULT_GEMINI_MODEL, OPENAI_COMPATIBLE_BASE_URLS
 from integrations.supabase_market_signal import upsert_market_signal_daily
 from integrations.supabase_recommendation import (
     mark_ai_recommendations,
@@ -163,7 +163,7 @@ def main() -> int:
     provider = os.getenv("DEFAULT_LLM_PROVIDER", "gemini").strip().lower() or "gemini"
     api_key = (os.getenv(f"{provider.upper()}_API_KEY") or os.getenv("GEMINI_API_KEY") or "").strip()
     model_env_key = f"{provider.upper()}_MODEL"
-    model = (os.getenv(model_env_key) or os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")).strip() or "gemini-3.1-flash-lite-preview"
+    model = (os.getenv(model_env_key) or os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)).strip() or DEFAULT_GEMINI_MODEL
     base_url_env_key = f"{provider.upper()}_BASE_URL"
     llm_base_url = (
         os.getenv(base_url_env_key)

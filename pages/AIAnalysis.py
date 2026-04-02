@@ -19,6 +19,7 @@ from app.layout import setup_page
 from app.navigation import show_right_nav
 from core.single_stock_logic import render_single_stock_page
 from integrations.llm_client import (
+    DEFAULT_GEMINI_MODEL,
     GEMINI_MODELS,
     OPENAI_COMPATIBLE_BASE_URLS,
     SUPPORTED_PROVIDERS,
@@ -73,7 +74,7 @@ def _get_provider_credentials(provider: str) -> tuple[str, str, str]:
             or ""
         ).strip()
     if not model and provider == "gemini":
-        model = st.session_state.get("gemini_model") or "gemini-3.1-flash-lite-preview"
+        model = st.session_state.get("gemini_model") or DEFAULT_GEMINI_MODEL
     return (api_key, model or "", base_url)
 
 

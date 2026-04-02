@@ -58,6 +58,11 @@ def load_stock_list():
     return get_all_stocks()
 
 
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=4)
+def _cached_stocks_by_board(board: str):
+    return get_stocks_by_board(board)
+
+
 EXPORT_CLEANUP_INTERVAL_SECONDS = 3 * 60 * 60
 
 
@@ -200,19 +205,19 @@ with content_col:
 
             if check_main:
                 selected_boards_codes.extend(
-                    [s["code"] for s in get_stocks_by_board("main")]
+                    [s["code"] for s in _cached_stocks_by_board("main")]
                 )
             if check_chinext:
                 selected_boards_codes.extend(
-                    [s["code"] for s in get_stocks_by_board("chinext")]
+                    [s["code"] for s in _cached_stocks_by_board("chinext")]
                 )
             if check_star:
                 selected_boards_codes.extend(
-                    [s["code"] for s in get_stocks_by_board("star")]
+                    [s["code"] for s in _cached_stocks_by_board("star")]
                 )
             if check_bse:
                 selected_boards_codes.extend(
-                    [s["code"] for s in get_stocks_by_board("bse")]
+                    [s["code"] for s in _cached_stocks_by_board("bse")]
                 )
 
             if selected_boards_codes:

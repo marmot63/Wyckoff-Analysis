@@ -52,10 +52,12 @@ RAG_SEMANTIC_VETO_ENABLED = os.getenv("RAG_SEMANTIC_VETO_ENABLED", "1").strip().
     "on",
 }
 RAG_SEMANTIC_TIMEOUT = int(os.getenv("RAG_SEMANTIC_TIMEOUT", "25"))
+from integrations.llm_client import DEFAULT_GEMINI_MODEL as _DEFAULT_GEMINI_MODEL
+
 RAG_SEMANTIC_MODEL = (
     os.getenv("RAG_SEMANTIC_MODEL", "").strip()
     or os.getenv("GEMINI_MODEL", "").strip()
-    or "gemini-3.1-flash-lite-preview"
+    or _DEFAULT_GEMINI_MODEL
 )
 _STAR_ST_PATTERN = re.compile(r"(?<![a-z0-9])(?:\*|＊)st\s*[\u4e00-\u9fff]", re.IGNORECASE)
 _ST_PATTERN = re.compile(r"(?<![a-z0-9\*＊])st\s*[\u4e00-\u9fff]", re.IGNORECASE)

@@ -4,7 +4,7 @@ import streamlit as st
 from supabase import create_client, Client
 from postgrest.exceptions import APIError
 from core.constants import TABLE_USER_SETTINGS
-from integrations.llm_client import OPENAI_COMPATIBLE_BASE_URLS
+from integrations.llm_client import DEFAULT_GEMINI_MODEL, OPENAI_COMPATIBLE_BASE_URLS
 
 CUSTOM_PROVIDER_KEYS = ("zhipu", "minimax", "qwen", "kimi", "volcengine")
 
@@ -44,7 +44,7 @@ def reset_user_settings_state() -> None:
     st.session_state.dingtalk_webhook = ""
     st.session_state.gemini_api_key = ""
     st.session_state.tushare_token = ""
-    st.session_state.gemini_model = "gemini-3.1-flash-lite-preview"
+    st.session_state.gemini_model = DEFAULT_GEMINI_MODEL
     st.session_state.gemini_base_url = ""
     st.session_state.tg_bot_token = ""
     st.session_state.tg_chat_id = ""
@@ -151,7 +151,7 @@ def load_user_settings(user_id: str):
             # 大模型配置
             st.session_state.gemini_api_key = settings.get("gemini_api_key") or ""
             st.session_state.gemini_model = (
-                settings.get("gemini_model") or "gemini-3.1-flash-lite-preview"
+                settings.get("gemini_model") or DEFAULT_GEMINI_MODEL
             )
             st.session_state.gemini_base_url = settings.get("gemini_base_url") or ""
             st.session_state.openai_api_key = settings.get("openai_api_key") or ""
@@ -189,9 +189,13 @@ def load_user_settings(user_id: str):
             st.session_state.tg_chat_id = settings.get("tg_chat_id") or ""
             return True
     except APIError as e:
-        print(f"Supabase API Error in load_user_settings: {e.code} - {e.message}")
+        import logging
+        logging.warning("Supabase API Error in load_user_settings: %s - %s", e.code, e.message)
+        st.toast(f"⚠️ 配置加载异常: {e.code}", icon="⚠️")
     except Exception as e:
-        print(f"Unexpected error in load_user_settings: {e}")
+        import logging
+        logging.warning("Unexpected error in load_user_settings: %s", e)
+        st.toast("⚠️ 配置加载失败，将使用默认值", icon="⚠️")
     return False
 
 

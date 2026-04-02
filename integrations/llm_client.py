@@ -29,11 +29,12 @@ OPENAI_COMPATIBLE_BASE_URLS = {
     "kimi": "https://api.moonshot.cn/v1",
     "volcengine": "https://ark.cn-beijing.volces.com/api/v3",
 }
+DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
 GEMINI_MODELS = (
-    "gemini-3.1-flash-lite-preview",
+    DEFAULT_GEMINI_MODEL,
     "gemini-2.5-flash-lite",
     "gemini-3-pro-preview",
-    "gemini-3-flash-preview"
+    "gemini-3-flash-preview",
 )
 GEMINI_MAX_OUTPUT_TOKENS_DEFAULT = 32768
 GEMINI_MAX_RETRIES = 3

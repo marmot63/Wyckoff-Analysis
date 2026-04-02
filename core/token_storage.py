@@ -11,7 +11,12 @@ _STORAGE_KEY_REFRESH = "akshare_refresh_token"
 
 
 def restore_tokens_from_storage() -> tuple[str | None, str | None]:
-    """从 localStorage 读取 token，返回 (access_token, refresh_token)，无则返回 (None, None)。"""
+    """从 localStorage 读取 token，返回 (access_token, refresh_token)，无则返回 (None, None)。
+
+    注意：streamlit-javascript 的 st_javascript() 是异步的——第一次渲染时
+    返回 0（占位），第二次 rerun 才拿到真实值。
+    调用方应在拿到 (None, None) 后不要标记"已尝试"，而是允许下一次 rerun 重试。
+    """
     try:
         from streamlit_javascript import st_javascript
 
@@ -22,7 +27,8 @@ def restore_tokens_from_storage() -> tuple[str | None, str | None]:
             "})"
         )
         result = st_javascript(js)
-        if not result or not isinstance(result, str):
+        # st_javascript 首次渲染返回 0（int），需等下一次 rerun 才拿到真实字符串
+        if not result or not isinstance(result, str) or result == "0":
             return (None, None)
         data = json.loads(result)
         access = (data.get("access_token") or "").strip()

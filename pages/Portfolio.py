@@ -241,19 +241,24 @@ def _cancel_todays_orders(portfolio_id: str, trade_date: str) -> tuple[int, str]
             .limit(500)
             .execute()
         ).data or []
-        active_rows = [
-            row
+        active_ids = [
+            row.get("id")
             for row in rows
             if str(row.get("status", "") or "").strip().upper() not in {"CANCELLED", "CANCELED"}
+            and row.get("id")
         ]
-        for row in active_rows:
-            (
-                supabase.table(TABLE_TRADE_ORDERS)
-                .update({"status": "CANCELLED"})
-                .eq("id", row.get("id"))
-                .execute()
-            )
-        return len(active_rows), ""
+        if not active_ids:
+            return 0, ""
+        # 批量更新：用 in_ 一次更新所有，避免 N+1
+        (
+            supabase.table(TABLE_TRADE_ORDERS)
+            .update({"status": "CANCELLED"})
+            .eq("portfolio_id", portfolio_id)
+            .eq("trade_date", trade_date)
+            .in_("id", active_ids)
+            .execute()
+        )
+        return len(active_ids), ""
     except APIError as e:
         return 0, f"AI 建议作废失败: {e.code} - {e.message}"
     except Exception as e:
@@ -270,10 +275,12 @@ def _render_notice(kind: str, text: str) -> None:
     tone = str(kind or "").strip().lower()
     if tone not in {"info", "success", "warning", "danger"}:
         tone = "info"
+    import html as _html
+    safe_text = _html.escape(str(text))
     st.markdown(
         f"""
 <div class="portfolio-notice portfolio-notice-{tone}">
-  <div class="notice-text">{text}</div>
+  <div class="notice-text">{safe_text}</div>
 </div>
         """,
         unsafe_allow_html=True,
@@ -576,7 +583,7 @@ with content_col:
         f"""
 <div class="portfolio-summary">
   <div class="portfolio-card">
-    <div class="label">总市值</div>
+    <div class="label">总资产（成本估算）</div>
     <div class="value">{_format_money(display_total_equity)}</div>
   </div>
   <div class="portfolio-card">
@@ -703,43 +710,44 @@ with content_col:
                     free_cash_value = _parse_money_input(free_cash_input, "现金")
                 except ValueError as e:
                     st.error(str(e))
-                    st.stop()
+                    free_cash_value = None
 
-                next_signature = compute_portfolio_state_signature(
-                    free_cash_value,
-                    _signature_positions_from_editor(editor_df),
-                )
-                signature_changed = next_signature != current_signature
-                should_cancel_orders = signature_changed or active_order_stale
-
-                loader = show_page_loading(title="保存中...", subtitle="正在写入 Supabase")
-                try:
-                    ok, msg = _save_user_live(
-                        portfolio_id=portfolio_id,
-                        free_cash=free_cash_value,
-                        editor_df=editor_df,
-                        existing_codes=existing_codes,
+                if free_cash_value is not None:
+                    next_signature = compute_portfolio_state_signature(
+                        free_cash_value,
+                        _signature_positions_from_editor(editor_df),
                     )
-                finally:
-                    loader.empty()
-                if ok:
-                    notice = msg
-                    warning_msg = ""
-                    if should_cancel_orders:
-                        cancelled_count, cancel_err = _cancel_todays_orders(
-                            portfolio_id,
-                            current_trade_date,
+                    signature_changed = next_signature != current_signature
+                    should_cancel_orders = signature_changed or active_order_stale
+
+                    loader = show_page_loading(title="保存中...", subtitle="正在写入 Supabase")
+                    try:
+                        ok, msg = _save_user_live(
+                            portfolio_id=portfolio_id,
+                            free_cash=free_cash_value,
+                            editor_df=editor_df,
+                            existing_codes=existing_codes,
                         )
-                        if cancelled_count:
-                            notice += f"；已作废当日 {cancelled_count} 条旧 AI 建议"
-                        if cancel_err:
-                            warning_msg = cancel_err
-                    st.session_state["portfolio_flash_notice"] = notice
-                    if warning_msg:
-                        st.session_state["portfolio_flash_warning"] = warning_msg
-                    st.rerun()
-                else:
-                    st.error(msg)
+                    finally:
+                        loader.empty()
+                    if ok:
+                        notice = msg
+                        warning_msg = ""
+                        if should_cancel_orders:
+                            cancelled_count, cancel_err = _cancel_todays_orders(
+                                portfolio_id,
+                                current_trade_date,
+                            )
+                            if cancelled_count:
+                                notice += f"；已作废当日 {cancelled_count} 条旧 AI 建议"
+                            if cancel_err:
+                                warning_msg = cancel_err
+                        st.session_state["portfolio_flash_notice"] = notice
+                        if warning_msg:
+                            st.session_state["portfolio_flash_warning"] = warning_msg
+                        st.rerun()
+                    else:
+                        st.error(msg)
 
     with tab_orders:
         st.caption("展示当前账号最近的 AI 订单建议。若持仓已变更而建议未刷新，这里会直接提示。")

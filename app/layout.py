@@ -5,7 +5,7 @@ import streamlit as st
 from app.auth_component import check_auth, login_form
 from core.token_storage import restore_tokens_from_storage
 from integrations.supabase_market_signal import compose_market_banner, load_latest_market_signal_daily
-from integrations.llm_client import OPENAI_COMPATIBLE_BASE_URLS
+from integrations.llm_client import DEFAULT_GEMINI_MODEL, OPENAI_COMPATIBLE_BASE_URLS
 
 def _set_default(key: str, value) -> None:
     if key not in st.session_state or st.session_state.get(key) is None:
@@ -28,8 +28,6 @@ def init_session_state() -> None:
     _set_default("custom_export_selected_signature", "")
     _set_default("custom_export_selected_path", "")
     _set_default("wyckoff_payload", None)
-    if "custom_export_df" in st.session_state:
-        del st.session_state["custom_export_df"]
 
     # 用户敏感配置不从环境变量兜底，避免跨账号污染
     _set_default("feishu_webhook", "")
@@ -50,9 +48,9 @@ def init_session_state() -> None:
     if st.session_state.tushare_token is None:
         st.session_state.tushare_token = ""
 
-    _set_default("gemini_model", "gemini-3.1-flash-lite-preview")
+    _set_default("gemini_model", DEFAULT_GEMINI_MODEL)
     if st.session_state.gemini_model is None:
-        st.session_state.gemini_model = "gemini-3.1-flash-lite-preview"
+        st.session_state.gemini_model = DEFAULT_GEMINI_MODEL
     for key in (
         "openai_api_key",
         "openai_model",
@@ -99,17 +97,25 @@ def init_session_state() -> None:
         st.session_state.tg_chat_id = ""
 
     # 从 localStorage 恢复 token（刷新页面后登录态保持）
+    # st_javascript 是异步的：首次渲染返回 0，第二次 rerun 才拿到真值。
+    # 因此最多尝试 2 次（_token_restore_pass 从 0→1→2），第 1 次触发 rerun 等 JS 执行。
     access = st.session_state.get("access_token") or ""
     refresh = st.session_state.get("refresh_token") or ""
-    if (not access or not refresh) and not st.session_state.get("_token_restore_attempted"):
+    restore_pass = int(st.session_state.get("_token_restore_pass", 0))
+    if (not access or not refresh) and restore_pass < 2:
         try:
-            st.session_state["_token_restore_attempted"] = True
             restored_access, restored_refresh = restore_tokens_from_storage()
             if restored_access and restored_refresh:
                 st.session_state.access_token = restored_access
                 st.session_state.refresh_token = restored_refresh
+                st.session_state["_token_restore_pass"] = 2  # 成功，不再重试
+            else:
+                st.session_state["_token_restore_pass"] = restore_pass + 1
+                if restore_pass == 0:
+                    # 第一次拿到 0 占位符，触发 rerun 等待 JS 返回真实值
+                    st.rerun()
         except Exception:
-            pass
+            st.session_state["_token_restore_pass"] = 2  # 出错不再重试
 
 
 def _inject_base_ui_css() -> None:
@@ -397,8 +403,13 @@ def _fmt_date_ymd(raw) -> str:
         return "--"
 
 
+@st.cache_data(ttl=60, show_spinner=False, max_entries=1)
+def _load_cached_market_signal() -> dict | None:
+    return load_latest_market_signal_daily()
+
+
 def _render_market_signal_banner() -> None:
-    row = load_latest_market_signal_daily()
+    row = _load_cached_market_signal()
     if not isinstance(row, dict):
         return
 

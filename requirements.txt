@@ -2,7 +2,7 @@ akshare>=1.18.9
 baostock
 efinance>=0.2.0
 tushare>=1.2.89
-pandas>=2.3.3
+pandas>=2.2.0,<3.0
 streamlit>=1.52.2
 streamlit-javascript>=0.1.5
 google-genai>=0.6.0

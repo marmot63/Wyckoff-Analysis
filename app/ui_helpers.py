@@ -25,12 +25,9 @@ def inject_custom_css():
             box-shadow: 0 4px 6px rgba(0,0,0,0.1);
         }
 
-        /* 卡片式容器 */
-        .css-1r6slb0, .css-12w0qpk {
+        /* 卡片式容器 — 使用 data-testid 选择器，不依赖 Streamlit 内部 hash class */
+        [data-testid="stVerticalBlock"] > [data-testid="element-container"] {
             border-radius: 12px;
-            padding: 1rem;
-            background-color: white;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
         }
 
         /* 加载动画 CSS */
