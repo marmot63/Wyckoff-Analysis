@@ -83,10 +83,10 @@ jobs:
           import os, sys, time, json
           sys.path.insert(0, '.')
 
-          from datetime import date, timedelta, datetime
+          from datetime import timedelta, datetime
           from pathlib import Path
           from concurrent.futures import ThreadPoolExecutor, as_completed
-          from threading import Semaphore
+          from threading import Lock
 
           import pandas as pd
 
@@ -105,27 +105,36 @@ jobs:
 
           print(f'[snapshot] 数据区间: {prefetch_start} -> {end_s}')
 
-          symbols = get_stocks_by_board(board)
+          raw_pool = get_stocks_by_board(board)
+          if raw_pool and isinstance(raw_pool[0], dict):
+              symbols = [str(item.get('code', '')).strip() for item in raw_pool]
+          else:
+              symbols = [str(item).strip() for item in raw_pool]
+          symbols = sorted({s.zfill(6) for s in symbols if s and s.isdigit()})
+          if not symbols:
+              print('[snapshot] 严重错误: 股票池为空，请检查 board 参数或行情源可用性')
+              sys.exit(1)
           if sample_size > 0 and sample_size < len(symbols):
               import random; random.seed(42)
               symbols = random.sample(symbols, sample_size)
-          print(f'[snapshot] 股票池: {len(symbols)} symbols')
+          print(f'[snapshot] 股票池: {len(symbols)} symbols, sample={symbols[:5]}')
 
           # ---- 速率控制：tushare 500次/分钟，留 20% 余量 → 400次/分钟 ----
           RATE_LIMIT = 400
           _call_times = []
+          _call_times_lock = Lock()
 
           def rate_limited_fetch(sym):
               # 简单滑动窗口限流
-              now = time.monotonic()
               while True:
-                  _call_times[:] = [t for t in _call_times if now - t < 60]
-                  if len(_call_times) < RATE_LIMIT:
-                      break
-                  sleep_for = 60 - (now - _call_times[0]) + 0.1
+                  with _call_times_lock:
+                      now = time.monotonic()
+                      _call_times[:] = [t for t in _call_times if now - t < 60]
+                      if len(_call_times) < RATE_LIMIT:
+                          _call_times.append(now)
+                          break
+                      sleep_for = 60 - (now - _call_times[0]) + 0.1
                   time.sleep(max(0.05, sleep_for))
-                  now = time.monotonic()
-              _call_times.append(time.monotonic())
 
               try:
                   raw = fetch_stock_hist(sym, prefetch_start, end_s, adjust='qfq')
@@ -141,11 +150,13 @@ jobs:
           all_frames = []
           ok = 0
           fail = 0
-          failed_syms = []
+          fail_samples = []
 
           def batch_fetch(sym_list, label=''):
-              nonlocal ok, fail
+              local_ok = 0
+              local_fail = 0
               local_fails = []
+              local_fail_samples = []
               with ThreadPoolExecutor(max_workers=2) as ex:
                   futs = {ex.submit(rate_limited_fetch, s): s for s in sym_list}
                   done = 0
@@ -154,25 +165,39 @@ jobs:
                       sym, df, err = ft.result()
                       if df is not None:
                           all_frames.append(df)
-                          ok += 1
+                          local_ok += 1
                       else:
-                          fail += 1
+                          local_fail += 1
                           local_fails.append(sym)
+                          if err and len(local_fail_samples) < 8:
+                              local_fail_samples.append(f'{sym}: {str(err)[:200]}')
                       if done % 500 == 0 or done == len(futs):
-                          print(f'[snapshot{label}] {done}/{len(futs)} (ok={ok}, fail={fail})')
-              return local_fails
+                          print(f'[snapshot{label}] {done}/{len(futs)} (ok={local_ok}, fail={local_fail})')
+              return local_fails, local_ok, local_fail, local_fail_samples
 
           # 第一轮
-          round1_fails = batch_fetch(symbols, ' round1')
+          round1_fails, round1_ok, round1_fail, round1_fail_samples = batch_fetch(symbols, ' round1')
+          ok += round1_ok
+          fail += round1_fail
+          fail_samples.extend(round1_fail_samples)
           print(f'[snapshot] 第一轮完成: ok={ok}, fail={fail}')
 
           # 重试失败的（等 30 秒让限流窗口过去）
           if round1_fails:
               print(f'[snapshot] 重试 {len(round1_fails)} 只失败股票...')
               time.sleep(30)
-              fail = fail - len(round1_fails)  # 重置计数
-              batch_fetch(round1_fails, ' retry')
+              retry_fails, retry_ok, retry_fail, retry_fail_samples = batch_fetch(round1_fails, ' retry')
+              ok += retry_ok
+              fail = retry_fail
+              fail_samples.extend(retry_fail_samples)
               print(f'[snapshot] 重试完成: ok={ok}, fail={fail}')
+              if retry_fails:
+                  print(f'[snapshot] 仍失败股票数: {len(retry_fails)}')
+
+          if fail_samples:
+              print('[snapshot] 失败样本:')
+              for item in fail_samples[:10]:
+                  print(f'  - {item}')
 
           # 基准指数
           bench_main = fetch_index_hist('000001', prefetch_start, end_s)
