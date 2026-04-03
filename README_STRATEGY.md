@@ -8,19 +8,24 @@
 - Step3 批量 AI 研报：`scripts/step3_batch_report.py` (LLM 三阵营战报构建)
 - Step4 私人再平衡 OMS：`scripts/step4_rebalancer.py` (持仓管理与实盘风控阻断)
 
-## 0. 核心概念与技术术语 (Concept Introduction)
+## 0. 核心概念与技术术语
 
-在深入了解量化选股策略之前，以下是策略中涉及到的核心股票金融概念：
+> **完整术语速查手册请参阅 [`GLOSSARY.md`](GLOSSARY.md)**，涵盖回测指标、Wyckoff 方法论、漏斗管线、板块轮动、大盘水温、watch_score 评分公式、OMS 风控等全部概念。
+>
+> 以下仅列出本文后续章节频繁引用的缩写，方便快速对照：
 
-- **RPS (Relative Price Strength，相对价格强度)**：著名的欧奈尔 CANSLIM 法则指标。体现一只股票在一段时间内的涨幅超越全市场所有股票的百分位（0-100）。如果 RPS50=90，说明近50天的收益率秒杀全场90%的股票。
-- **RS (Relative Strength，相对强度)**：个股涨跌幅减去同期大盘涨跌幅所得的值，用来衡量股票相对大盘是领涨还是跟跌的属性。
-- **ATR (Average True Range，平均真实波动率)**：一段时间内资产价格的最大真实波动范围，我们常用来设定滑点保护或自适应移动止损线。
-- **SOS (Sign of Strength，强势信号) / LPS (Last Point of Support，最后支撑点)**：在 Wyckoff（威科夫）形态分析体系中，用来标记出底部爆发右侧或回踩确认的信号位置。
-- **EVR (Effort vs Result，量价背离/努力与结果)**：同样出自威科夫理论，比如在一高位成交量巨量放大（Effort 大），但价格没有相应上涨（Result 差），常常意味着主力在借势派发。
-- **MA (Moving Average，移动平均线)**：一段时间内的平均收盘价，用于平滑短期波动，识别长期趋势（如 MA50 为 50日均线）。
-- **SLTP (Stop Loss & Take Profit，止损与止盈)**：回测与交易中常见的退出机制组合，当价格下跌触发预设的硬底线（止损线）或上涨达到目标（止盈线）时，系统自动抛出平仓。
-- **VaR (Value at Risk，在险价值)**：衡量在一定的置信水平下（本策略默认 95%），资产或策略组合在特定时间内可能发生的最大损失比例。用于评估普通极端行情下的风险下限。
-- **CVaR (Conditional Value at Risk，条件在险价值 / 预期尾部损失)**：VaR 的延伸指标，衡量当损失不幸击穿了 VaR 那个阈值之后，那些“最糟糕情况下的平均损失幅度到底有多深”。是对黑天鹅尾部风险的终极度量。
+| 缩写 | 全称 | 一句话 |
+|------|------|--------|
+| RPS | Relative Price Strength | 涨幅超越全市场 N% 股票的百分位排名 |
+| RS | Relative Strength | 个股涨幅 - 大盘涨幅 |
+| ATR | Average True Range | 平均真实波动率，用于自适应止损 |
+| SOS | Sign of Strength | 放量突破——吸筹结束的发令枪 |
+| LPS | Last Point of Support | 缩量回踩——最后支撑点 |
+| EVR | Effort vs Result | 量价背离——放量不跌，主力承接 |
+| MA | Moving Average | 移动平均线（MA50 / MA200） |
+| SLTP | Stop Loss & Take Profit | 止损止盈退出机制 |
+| VaR | Value at Risk | 95% 置信下单笔最大损失 |
+| CVaR | Conditional VaR | 击穿 VaR 后的平均尾部损失 |
 
 ## 1. 系统调度与数据工程
 
