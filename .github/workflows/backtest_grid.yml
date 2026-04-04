@@ -295,6 +295,7 @@ jobs:
             --take-profit 0 \
             --sltp-priority stop_first \
             --regime-filter \
+            --no-use-current-meta \
             --snapshot-dir snapshot_data \
             --output-dir "${OUT_DIR}" \
             | tee "${OUT_DIR}/run.log"
