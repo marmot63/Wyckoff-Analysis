@@ -30,6 +30,10 @@ on:
         description: "回看交易日数"
         required: true
         default: "500"
+      trailing_stop:
+        description: "移动止盈(%), 如 -5 表示从最高点回撤5%卖出, 0=关闭"
+        required: true
+        default: "-5"
 
 concurrency:
   group: backtest-grid-${{ github.ref }}
@@ -43,6 +47,7 @@ env:
   BT_BOARD: ${{ inputs.board || 'all' }}
   BT_SAMPLE_SIZE: ${{ inputs.sample_size || '0' }}
   BT_TRADING_DAYS: ${{ inputs.trading_days || '500' }}
+  BT_TRAILING_STOP: ${{ inputs.trailing_stop || '-5' }}
 
 jobs:
   # ────────────────────────────────────────────────
@@ -322,6 +327,7 @@ jobs:
             --take-profit 0 \
             --sltp-priority stop_first \
             --regime-filter \
+            --trailing-stop "${BT_TRAILING_STOP}" \
             --snapshot-dir snapshot_data \
             --output-dir "${OUT_DIR}" \
             | tee "${OUT_DIR}/run.log"

@@ -50,6 +50,7 @@ DEFAULT_HOLD_DAYS = 30  # 网格优化：30天夏普2.493 > 25天1.967 > 20天1.
 DEFAULT_EXIT_MODE = "sltp"
 DEFAULT_STOP_LOSS_PCT = -7.0   # 网格优化最佳：SL7/TP18（夏普1.928 > SL6/TP15的1.679 > SL8/TP20的1.466）
 DEFAULT_TAKE_PROFIT_PCT = 18.0
+DEFAULT_TRAILING_STOP_PCT = 0.0  # 0 = 不启用移动止盈；如 -5.0 表示从最高点回撤 5% 卖出
 DEFAULT_USE_CURRENT_META = False
 DEFAULT_BUY_FRICTION_PCT = float(os.getenv("BACKTEST_BUY_FRICTION_PCT", "0.5"))
 DEFAULT_SELL_FRICTION_PCT = float(os.getenv("BACKTEST_SELL_FRICTION_PCT", "0.5"))
@@ -505,6 +506,7 @@ def run_backtest(
     exit_mode: str = DEFAULT_EXIT_MODE,
     stop_loss_pct: float = DEFAULT_STOP_LOSS_PCT,
     take_profit_pct: float = DEFAULT_TAKE_PROFIT_PCT,
+    trailing_stop_pct: float = DEFAULT_TRAILING_STOP_PCT,
     sltp_priority: str = "stop_first",
     use_current_meta: bool = DEFAULT_USE_CURRENT_META,
     buy_friction_pct: float = DEFAULT_BUY_FRICTION_PCT,
@@ -519,6 +521,8 @@ def run_backtest(
         raise ValueError("exit_mode 必须是 close_only 或 sltp")
     if sltp_priority not in {"stop_first", "take_first"}:
         raise ValueError("sltp_priority 必须是 stop_first 或 take_first")
+    if trailing_stop_pct > 0:
+        raise ValueError("trailing_stop_pct 必须 <= 0（如 -5.0 表示从最高点回撤 5%），0 表示不启用")
     if stop_loss_pct > 0:
         raise ValueError("stop_loss_pct 必须 <= 0，0 表示不设止损")
     if take_profit_pct < 0:
@@ -755,6 +759,8 @@ def run_backtest(
                     if take_profit_pct > 0
                     else None
                 )
+                use_trailing = trailing_stop_pct < 0
+                peak_high = entry_close  # 持仓期间最高价，用于移动止盈
 
                 for mkt_day in market_window:
                     candle = day_ohlc.get(mkt_day)
@@ -762,10 +768,22 @@ def run_backtest(
                         continue
                     open_px, high, low, _ = candle
 
+                    # 更新持仓期间最高价（用当日最高价）
+                    peak_high = max(peak_high, high)
+
+                    # 移动止盈线 = 最高价 × (1 + trailing_stop_pct/100)
+                    trailing_price = (
+                        peak_high * (1.0 + trailing_stop_pct / 100.0)
+                        if use_trailing
+                        else None
+                    )
+
+                    # 检查顺序：固定止损 → 移动止盈 → 固定止盈
+                    # （先保命、再锁利、最后达标止盈）
                     if sltp_priority == "stop_first":
-                        checks = [("sl", sl_price), ("tp", tp_price)]
+                        checks = [("sl", sl_price), ("trail", trailing_price), ("tp", tp_price)]
                     else:
-                        checks = [("tp", tp_price), ("sl", sl_price)]
+                        checks = [("tp", tp_price), ("trail", trailing_price), ("sl", sl_price)]
 
                     hit = False
                     for kind, px in checks:
@@ -773,6 +791,13 @@ def run_backtest(
                             continue
                         if kind == "sl" and low <= px:
                             # 若开盘已跳空跌破止损，只能按开盘附近成交；否则按止损价成交。
+                            exit_close = px if open_px >= px else open_px
+                            exit_date = mkt_day
+                            hit = True
+                            break
+                        if kind == "trail" and low <= px:
+                            # 移动止盈触发（从最高点回撤超限）
+                            # 跳空逻辑同止损：开盘已低于 trailing_price 时按开盘成交
                             exit_close = px if open_px >= px else open_px
                             exit_date = mkt_day
                             hit = True
@@ -843,6 +868,7 @@ def run_backtest(
         "exit_mode": exit_mode,
         "stop_loss_pct": stop_loss_pct,
         "take_profit_pct": take_profit_pct,
+        "trailing_stop_pct": trailing_stop_pct,
         "sltp_priority": sltp_priority,
         "use_current_meta": bool(use_current_meta),
         "buy_friction_pct": float(buy_friction_pct),
@@ -1103,6 +1129,7 @@ def _build_summary_md(summary: dict) -> str:
             f"- 离场模式: {summary.get('exit_mode')}",
             f"- 止损线: {_fmt_metric(summary.get('stop_loss_pct'), 1)}%",
             f"- 止盈线: {_fmt_metric(summary.get('take_profit_pct'), 1)}%",
+            f"- 移动止盈: {_fmt_metric(summary.get('trailing_stop_pct'), 1)}%（从最高点回撤）" if summary.get('trailing_stop_pct', 0) < 0 else "- 移动止盈: 关闭",
             f"- 日内触发优先级: {summary.get('sltp_priority')}",
             f"- 买入摩擦成本: {_fmt_metric(summary.get('buy_friction_pct'), 3)}%",
             f"- 卖出摩擦成本: {_fmt_metric(summary.get('sell_friction_pct'), 3)}%",
@@ -1218,6 +1245,12 @@ def main() -> int:
         help=f"止盈线(%%), 如 10.0 表示涨超 10%% 止盈. 0 表示不设止盈 (default: {DEFAULT_TAKE_PROFIT_PCT})",
     )
     parser.add_argument(
+        "--trailing-stop",
+        type=float,
+        default=DEFAULT_TRAILING_STOP_PCT,
+        help=f"移动止盈(%%), 如 -5.0 表示从最高点回撤 5%% 卖出. 0 表示不启用 (default: {DEFAULT_TRAILING_STOP_PCT})",
+    )
+    parser.add_argument(
         "--sltp-priority",
         choices=["stop_first", "take_first"],
         default="stop_first",
@@ -1295,6 +1328,7 @@ def main() -> int:
                 exit_mode=args.exit_mode,
                 stop_loss_pct=args.stop_loss,
                 take_profit_pct=args.take_profit,
+                trailing_stop_pct=args.trailing_stop,
                 sltp_priority=args.sltp_priority,
                 use_current_meta=args.use_current_meta,
                 buy_friction_pct=args.buy_friction_pct,
