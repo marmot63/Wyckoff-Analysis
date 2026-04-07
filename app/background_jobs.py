@@ -47,8 +47,8 @@ def background_jobs_ready_for_current_user() -> tuple[bool, str]:
 def submit_background_job(job_kind: str, payload: dict[str, Any], *, state_key: str) -> str:
     user_id = current_user_id()
     merged_payload = {"user_id": user_id, **payload}
-    # ── AGENT_MODE: 进程内 daemon thread 执行 ──
-    if agent_mode_enabled():
+    # ── full_pipeline 始终走进程内执行（GitHub Actions 不支持此 job_kind） ──
+    if agent_mode_enabled() or job_kind == "full_pipeline":
         return submit_agent_job(job_kind, merged_payload, state_key=state_key)
     # ── 原有 GH Actions 路径 ──
     request_id = trigger_web_job(job_kind, merged_payload)

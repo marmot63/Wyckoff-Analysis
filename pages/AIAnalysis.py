@@ -6,9 +6,9 @@ import time
 import pandas as pd
 import streamlit as st
 
-from app.agent_jobs import agent_mode_enabled
 from app.background_jobs import (
     background_jobs_ready_for_current_user,
+    current_user_id,
     load_latest_job_result,
     refresh_background_job_data,
     render_background_job_status,
@@ -146,21 +146,15 @@ with content_col:
     st.title("🤖 AI 分析")
     st.markdown("单股本地分析 · 批量后台研报 · 完整管线一键运行")
 
-    _type_options = ["single_stock", "stock_list", "find_gold"]
-    _type_labels = {
-        "single_stock": "单股分析 (本地)",
-        "stock_list": "指定股票代码 (后台批量研报)",
-        "find_gold": "使用后台漏斗候选 (后台批量研报)",
-    }
-    # AGENT_MODE 启用时才展示完整管线选项
-    if agent_mode_enabled():
-        _type_options.append("full_pipeline")
-        _type_labels["full_pipeline"] = "🚀 完整管线 (本地)"
-
     analysis_type = st.radio(
         "分析类型",
-        options=_type_options,
-        format_func=lambda x: _type_labels.get(x, x),
+        options=["single_stock", "stock_list", "find_gold", "full_pipeline"],
+        format_func=lambda x: {
+            "single_stock": "单股分析 (本地)",
+            "stock_list": "指定股票代码 (后台批量研报)",
+            "find_gold": "使用后台漏斗候选 (后台批量研报)",
+            "full_pipeline": "🚀 完整管线",
+        }.get(x, x),
         horizontal=True,
         key="ai_analysis_type",
     )
@@ -206,21 +200,26 @@ with content_col:
         )
         st.stop()
 
-    # ── 完整管线 (AGENT_MODE 本地执行) ──
+    # ── 完整管线 (进程内 Agent Pipeline) ──
     if analysis_type == "full_pipeline":
-        if not agent_mode_enabled():
-            st.info(
-                "完整管线仅在本地 `AGENT_MODE=1` 环境下可用。"
-                "在 Streamlit Cloud 上请分别使用「沙里淘金」和批量研报模式。"
-            )
+        _uid = current_user_id()
+        if not _uid:
+            st.warning("请先登录后使用完整管线。")
             st.stop()
 
-        ready_p, ready_p_msg = background_jobs_ready_for_current_user()
-        if not ready_p:
-            st.error(ready_p_msg)
-            st.stop()
+        from integrations.supabase_job_usage import (
+            check_daily_limit, get_user_tier_info, increment_daily_usage,
+        )
+
+        _tier_info = get_user_tier_info(_uid)
+        _allowed, _used, _limit = check_daily_limit(_uid, "full_pipeline")
 
         st.info("完整管线将在进程内依次执行：**漏斗筛选 → 大盘环境 → AI 研报 → 持仓策略 → 通知汇总**。")
+        if _limit < 0:
+            st.caption(f"等级：**{_tier_info['label']}** · 不限次数")
+        elif _limit > 0:
+            _remaining = max(_limit - _used, 0)
+            st.caption(f"等级：**{_tier_info['label']}** · 今日剩余额度：**{_remaining}/{_limit}** 次")
 
         # 模型配置
         with st.expander("模型配置", expanded=False):
@@ -283,20 +282,27 @@ with content_col:
         else:
             if not p_api_key:
                 st.warning(f"请配置 {PROVIDER_LABELS.get(p_provider, p_provider)} API Key。")
-            if st.button("🚀 一键运行完整管线", type="primary", disabled=not p_api_key, use_container_width=True):
-                user = st.session_state.get("user") or {}
-                uid = str(user.get("id", "") or "").strip() if isinstance(user, dict) else ""
-                payload = {
-                    "user_id": uid,
-                    "provider": p_provider,
-                    "model": p_model,
-                    "api_key": p_api_key,
-                    "base_url": p_base_url,
-                    "webhook_url": (p_webhook or "").strip(),
-                    "skip_step4": p_skip_step4,
-                }
-                submit_background_job("full_pipeline", payload, state_key=PIPELINE_STATE_KEY)
-                st.rerun()
+            btn_disabled = (not p_api_key) or (not _allowed)
+            if not _allowed:
+                st.warning(f"今日管线额度已用完（{_used}/{_limit}），明天再来。")
+            if st.button("🚀 一键运行完整管线", type="primary", disabled=btn_disabled, use_container_width=True):
+                # 提交前再次校验（防并发竞态）
+                ok2, used2, lim2 = check_daily_limit(_uid, "full_pipeline")
+                if not ok2:
+                    st.error(f"额度已用完（{used2}/{lim2}），请明天再试。")
+                else:
+                    increment_daily_usage(_uid, "full_pipeline")
+                    payload = {
+                        "user_id": _uid,
+                        "provider": p_provider,
+                        "model": p_model,
+                        "api_key": p_api_key,
+                        "base_url": p_base_url,
+                        "webhook_url": (p_webhook or "").strip(),
+                        "skip_step4": p_skip_step4,
+                    }
+                    submit_background_job("full_pipeline", payload, state_key=PIPELINE_STATE_KEY)
+                    st.rerun()
 
         p_state = sync_background_job_state(state_key=PIPELINE_STATE_KEY)
         if isinstance(p_state, dict) and p_state.get("request_id"):
