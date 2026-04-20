@@ -5,6 +5,7 @@ Supabase 客户端工厂 — 不依赖 Streamlit，CLI / 脚本 / Web 通用。
 所有需要 Supabase 客户端的代码应从此模块获取，而不是各自 create_client。
 - 脚本/定时任务：使用 create_admin_client()（service_role key，绕过 RLS）
 - Web 端：使用 integrations.supabase_client.get_supabase_client()（内部调本模块 + 绑定用户 session）
+- CLI：无 .env，自动回退到 cli/auth 内置的 anon key
 """
 from __future__ import annotations
 
@@ -15,20 +16,43 @@ if TYPE_CHECKING:
     from supabase import Client
 
 
+def _resolve_credentials() -> tuple[str, str]:
+    """解析 Supabase URL 和 Key，统一回退链：环境变量 → 内置 anon key → Streamlit secrets。"""
+    url = os.getenv("SUPABASE_URL", "").strip()
+    key = os.getenv("SUPABASE_KEY", "").strip()
+    if url and key:
+        return url, key
+    # 内置 anon key（CLI / 无 .env 场景）
+    from core.constants import SUPABASE_ANON_URL, SUPABASE_ANON_KEY
+    url = url or SUPABASE_ANON_URL
+    key = key or SUPABASE_ANON_KEY
+    if url and key:
+        return url, key
+    # Streamlit Cloud
+    try:
+        import streamlit as st
+        url = url or str(st.secrets.get("SUPABASE_URL", "") or "").strip()
+        key = key or str(st.secrets.get("SUPABASE_KEY", "") or "").strip()
+    except Exception:
+        pass
+    return url, key
+
+
 def create_admin_client() -> "Client":
     """Service-role 客户端（写库用，不经过 RLS）。
 
-    优先读 SUPABASE_SERVICE_ROLE_KEY，回退到 SUPABASE_KEY。
+    优先读 SUPABASE_SERVICE_ROLE_KEY，回退到通用凭据链。
     """
     from supabase import create_client
 
     url = os.getenv("SUPABASE_URL", "").strip()
-    key = (
-        os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-        or os.getenv("SUPABASE_KEY", "").strip()
-    )
+    service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if url and service_key:
+        return create_client(url, service_key)
+    # 无 service_role key 时走通用链（CLI 场景用 anon key）
+    url, key = _resolve_credentials()
     if not url or not key:
-        raise ValueError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 未配置")
+        raise ValueError("SUPABASE_URL / SUPABASE_KEY 未配置")
     return create_client(url, key)
 
 
@@ -39,19 +63,7 @@ def create_anon_client() -> "Client":
     """
     from supabase import create_client
 
-    url = os.getenv("SUPABASE_URL", "").strip()
-    key = os.getenv("SUPABASE_KEY", "").strip()
-
-    # Streamlit Cloud 可能没有 .env，需要从 st.secrets 读取
-    if not url or not key:
-        try:
-            import streamlit as st
-
-            url = url or str(st.secrets.get("SUPABASE_URL", "") or "").strip()
-            key = key or str(st.secrets.get("SUPABASE_KEY", "") or "").strip()
-        except Exception:
-            pass
-
+    url, key = _resolve_credentials()
     if not url or not key:
         raise ValueError(
             "Missing Supabase credentials. "
@@ -68,8 +80,7 @@ def create_user_client(access_token: str, refresh_token: str = "") -> "Client":
     """
     from supabase import create_client
 
-    url = os.getenv("SUPABASE_URL", "").strip()
-    key = os.getenv("SUPABASE_KEY", "").strip()
+    url, key = _resolve_credentials()
     if not url or not key:
         raise ValueError("SUPABASE_URL / SUPABASE_KEY 未配置")
     client = create_client(url, key)
@@ -80,10 +91,6 @@ def create_user_client(access_token: str, refresh_token: str = "") -> "Client":
 
 
 def is_admin_configured() -> bool:
-    """检查 admin 写库环境变量是否已配置。"""
-    url = os.getenv("SUPABASE_URL", "").strip()
-    key = (
-        os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-        or os.getenv("SUPABASE_KEY", "").strip()
-    )
+    """检查是否能创建可用的 Supabase 客户端。"""
+    url, key = _resolve_credentials()
     return bool(url and key)

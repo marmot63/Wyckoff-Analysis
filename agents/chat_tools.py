@@ -898,6 +898,104 @@ def _to_ts_code(code: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool 11: 持仓管理
+# ---------------------------------------------------------------------------
+
+def update_portfolio(
+    action: str,
+    code: str = "",
+    name: str = "",
+    shares: int = 0,
+    cost_price: float = 0,
+    buy_dt: str = "",
+    free_cash: float = 0,
+    tool_context: ToolContext = None,
+) -> dict:
+    """管理用户持仓：新增、修改、删除持仓，或设置可用资金。
+
+    Args:
+        action: 操作类型，"add"（新增/加仓）、"update"（修改）、"remove"（删除）、"set_cash"（设置可用资金）
+        code: 6 位股票代码（add/update/remove 时必填）
+        name: 股票名称（可选）
+        shares: 持仓股数
+        cost_price: 成本价
+        buy_dt: 买入日期（YYYYMMDD 格式）
+        free_cash: 可用资金（set_cash 时使用）
+
+    Returns:
+        操作结果和最新持仓摘要。
+    """
+    try:
+        from integrations.supabase_portfolio import (
+            build_user_live_portfolio_id,
+            load_portfolio_state,
+            upsert_position,
+            delete_position,
+            update_free_cash,
+        )
+        from integrations.supabase_base import create_user_client
+
+        user_id = _get_user_id(tool_context)
+        if not user_id:
+            return {"error": "未登录，请先执行 /login"}
+
+        _at = (tool_context.state.get("access_token") or "") if tool_context else ""
+        _rt = (tool_context.state.get("refresh_token") or "") if tool_context else ""
+        if not _at:
+            return {"error": "缺少 access_token，请重新登录"}
+
+        client = create_user_client(_at, _rt)
+        portfolio_id = build_user_live_portfolio_id(user_id)
+        action = action.strip().lower()
+
+        if action in ("add", "update"):
+            if not code:
+                return {"error": "add/update 操作需要提供股票代码 code"}
+            ok, msg = upsert_position(portfolio_id, {
+                "code": code.strip(),
+                "name": name,
+                "shares": shares,
+                "cost_price": cost_price,
+                "buy_dt": buy_dt,
+            }, client=client)
+            if not ok:
+                return {"error": msg}
+
+        elif action == "remove":
+            if not code:
+                return {"error": "remove 操作需要提供股票代码 code"}
+            ok, msg = delete_position(portfolio_id, code.strip(), client=client)
+            if not ok:
+                return {"error": msg}
+
+        elif action == "set_cash":
+            ok, msg = update_free_cash(portfolio_id, free_cash, client=client)
+            if not ok:
+                return {"error": msg}
+
+        else:
+            return {"error": f"未知操作: {action}，支持 add/update/remove/set_cash"}
+
+        # 返回最新持仓状态
+        state = load_portfolio_state(portfolio_id, client=client)
+        if not state:
+            return {"success": True, "message": msg, "positions": []}
+        summary = []
+        for p in state.get("positions", []):
+            summary.append(f"{p['code']} {p.get('name','')} {p.get('shares',0)}股 成本{p.get('cost',0)}")
+        return {
+            "success": True,
+            "message": msg,
+            "free_cash": state.get("free_cash", 0),
+            "position_count": len(state.get("positions", [])),
+            "positions_summary": summary,
+        }
+    except Exception as e:
+        logger.exception("update_portfolio error")
+        return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
 # 工具列表导出
 # ---------------------------------------------------------------------------
 
@@ -912,4 +1010,5 @@ WYCKOFF_TOOLS = [
     generate_strategy_decision,
     get_recommendation_tracking,
     get_signal_pending,
+    update_portfolio,
 ]

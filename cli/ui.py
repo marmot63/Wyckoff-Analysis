@@ -19,7 +19,7 @@ from rich.text import Text
 console = Console()
 
 _commands = WordCompleter(
-    ["/help", "/clear", "/new", "/quit", "/exit", "/q", "/model", "/login", "/logout"],
+    ["/help", "/clear", "/new", "/quit", "/exit", "/q", "/model", "/login", "/logout", "/token"],
     sentence=True,
 )
 _session: PromptSession | None = None
@@ -135,7 +135,8 @@ def print_help() -> None:
     console.print("  [bold]命令[/bold]")
     console.print("  [cyan]/model[/cyan]    配置模型      [cyan]/login[/cyan]   登录")
     console.print("  [cyan]/new[/cyan]      新对话        [cyan]/logout[/cyan]  登出")
-    console.print("  [cyan]/clear[/cyan]    清屏          [cyan]/quit[/cyan]    退出")
+    console.print("  [cyan]/token[/cyan]    用量统计      [cyan]/quit[/cyan]    退出")
+    console.print("  [cyan]/clear[/cyan]    清屏")
     console.print()
     console.print("  [bold]试试这样问[/bold]")
     console.print("  [dim]帮我看看宁德时代[/dim]          个股诊断")
@@ -185,10 +186,8 @@ DEFAULT_MODELS = {
 }
 
 
-def _save_to_dotenv(key: str, value: str) -> None:
-    from dotenv import set_key
-    env_path = os.path.join(os.getcwd(), ".env")
-    set_key(env_path, key, value)
+def _save_to_env(key: str, value: str) -> None:
+    """将配置写入环境变量（运行时生效，持久化由 config.json 负责）。"""
     os.environ[key] = value
 
 
@@ -223,8 +222,7 @@ def configure_model(state: dict) -> dict | None:
         if not api_key:
             print_error("API Key 不能为空。")
             return None
-        _save_to_dotenv(env_key, api_key)
-        console.print(f"  [green]+[/green] 已保存到 .env")
+        _save_to_env(env_key, api_key)
 
     model_env_key = f"{provider_name.upper()}_MODEL"
     if provider_name == "claude":
@@ -237,8 +235,7 @@ def configure_model(state: dict) -> dict | None:
         default_model = DEFAULT_MODELS.get(provider_name, "")
         model = _prompt("模型名称", default_model)
         if model and model != default_model:
-            _save_to_dotenv(model_env_key, model)
-            console.print(f"  [green]+[/green] 已保存到 .env")
+            _save_to_env(model_env_key, model)
 
     base_url = ""
     if provider_name == "openai":
@@ -250,8 +247,7 @@ def configure_model(state: dict) -> dict | None:
             console.print("  [dim]OpenAI 官方直接回车跳过，第三方兼容端点请输入 URL[/dim]")
             base_url = _prompt("Base URL")
             if base_url:
-                _save_to_dotenv("OPENAI_BASE_URL", base_url)
-                console.print(f"  [green]+[/green] 已保存到 .env")
+                _save_to_env("OPENAI_BASE_URL", base_url)
 
     console.print()
     return {
@@ -319,6 +315,19 @@ def print_usage(input_tokens: int, output_tokens: int, elapsed: float = 0, model
         parts.append(f"{elapsed:.1f}s")
     if parts:
         console.print(f"  [dim]↳ {' · '.join(parts)}[/dim]")
+
+
+def print_token_summary(session_tokens: dict, model: str = "") -> None:
+    total = session_tokens["input"] + session_tokens["output"]
+    console.print()
+    console.print("  [bold]本次会话 Token 用量[/bold]")
+    if model:
+        console.print(f"  模型      {model}")
+    console.print(f"  对话轮数  {session_tokens['rounds']}")
+    console.print(f"  输入      {session_tokens['input']:,}")
+    console.print(f"  输出      {session_tokens['output']:,}")
+    console.print(f"  合计      {total:,}")
+    console.print()
 
 
 def print_error(message: str) -> None:

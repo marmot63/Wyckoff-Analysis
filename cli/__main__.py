@@ -80,7 +80,7 @@ def _do_update():
     pkg = "youngcan-wyckoff-analysis"
     uv = shutil.which("uv")
     if uv:
-        cmd = [uv, "pip", "install", "--upgrade", pkg]
+        cmd = [uv, "pip", "install", "--python", sys.executable, "--upgrade", pkg]
     else:
         cmd = [sys.executable, "-m", "pip", "install", "--upgrade", pkg]
     try:
@@ -126,32 +126,22 @@ def main():
     # UI
     from cli import ui
 
-    # --- Auth：尝试恢复登录态 ---
-    auth_state = {
-        "user_id": "",
-        "email": "",
-        "access_token": "",
-        "refresh_token": "",
-    }
+    # --- Auth + Tools：统一 session state ---
+    from cli.tools import ToolRegistry
+    tools = ToolRegistry()
 
     try:
         from cli.auth import restore_session
         session = restore_session()
         if session:
-            auth_state["user_id"] = session["user_id"]
-            auth_state["email"] = session["email"]
-            auth_state["access_token"] = session.get("access_token", "")
-            auth_state["refresh_token"] = session.get("refresh_token", "")
+            tools.state.update({
+                "user_id": session["user_id"],
+                "email": session["email"],
+                "access_token": session.get("access_token", ""),
+                "refresh_token": session.get("refresh_token", ""),
+            })
     except Exception:
         pass
-
-    # 创建工具注册表（user_id + token 来自 auth）
-    from cli.tools import ToolRegistry
-    tools = ToolRegistry(
-        user_id=auth_state["user_id"],
-        access_token=auth_state.get("access_token", ""),
-        refresh_token=auth_state.get("refresh_token", ""),
-    )
 
     # 加载系统提示词
     from core.prompts import CHAT_AGENT_SYSTEM_PROMPT
@@ -200,13 +190,12 @@ def main():
             email, password = creds
             try:
                 session = login(email, password)
-                auth_state["user_id"] = session["user_id"]
-                auth_state["email"] = session["email"]
-                auth_state["access_token"] = session.get("access_token", "")
-                auth_state["refresh_token"] = session.get("refresh_token", "")
-                tools._tool_context.state["user_id"] = session["user_id"]
-                tools._tool_context.state["access_token"] = session.get("access_token", "")
-                tools._tool_context.state["refresh_token"] = session.get("refresh_token", "")
+                tools.state.update({
+                    "user_id": session["user_id"],
+                    "email": session["email"],
+                    "access_token": session.get("access_token", ""),
+                    "refresh_token": session.get("refresh_token", ""),
+                })
                 ui.print_info(f"✓ 登录成功 ({session['email']})")
                 return
             except Exception as e:
@@ -221,22 +210,22 @@ def main():
         """执行登出。"""
         from cli.auth import logout
         logout()
-        auth_state["user_id"] = ""
-        auth_state["email"] = ""
-        auth_state["access_token"] = ""
-        auth_state["refresh_token"] = ""
-        tools._tool_context.state["user_id"] = ""
-        tools._tool_context.state["access_token"] = ""
-        tools._tool_context.state["refresh_token"] = ""
+        tools.state.update({
+            "user_id": "",
+            "email": "",
+            "access_token": "",
+            "refresh_token": "",
+        })
         ui.print_info("已退出登录。")
 
     # Banner
     if not args.quiet:
         model_hint = f"{state['provider_name']}:{state['model']}" if state["provider"] else ""
-        ui.print_banner(email=auth_state["email"], model=model_hint)
+        ui.print_banner(email=tools.state.get("email", ""), model=model_hint)
 
-    # 对话历史
+    # 对话历史 & 累计 token 统计
     messages: list[dict] = []
+    session_tokens = {"input": 0, "output": 0, "rounds": 0}
 
     # REPL
     while True:
@@ -253,7 +242,7 @@ def main():
             elif cmd == "/clear":
                 os.system("clear" if os.name != "nt" else "cls")
                 model_hint = f"{state['provider_name']}:{state['model']}" if state["provider"] else ""
-                ui.print_banner(email=auth_state["email"], model=model_hint)
+                ui.print_banner(email=tools.state.get("email", ""), model=model_hint)
             elif cmd == "/new":
                 messages.clear()
                 ui.print_info("新对话已开始。")
@@ -266,6 +255,9 @@ def main():
                 continue
             elif cmd == "/logout":
                 _do_logout()
+                continue
+            elif cmd == "/token":
+                ui.print_token_summary(session_tokens, state.get("model", ""))
                 continue
             elif cmd == "/model":
                 result = ui.configure_model(state)
@@ -320,12 +312,11 @@ def main():
             else:
                 ui.console.print()  # 流式后补一个空行
             usage = result.get("usage", {})
-            ui.print_usage(
-                usage.get("input_tokens", 0),
-                usage.get("output_tokens", 0),
-                result.get("elapsed", 0),
-                state.get("model", ""),
-            )
+            inp, out = usage.get("input_tokens", 0), usage.get("output_tokens", 0)
+            session_tokens["input"] += inp
+            session_tokens["output"] += out
+            session_tokens["rounds"] += 1
+            ui.print_usage(inp, out, result.get("elapsed", 0), state.get("model", ""))
         except KeyboardInterrupt:
             ui.print_info("\n已中断。")
             if messages and messages[-1]["role"] == "user":

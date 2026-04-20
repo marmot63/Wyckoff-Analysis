@@ -129,7 +129,6 @@ class PositionItem:
     cost: float
     buy_dt: str
     shares: int
-    strategy: str
     stop_loss: float | None = None
 
 
@@ -403,13 +402,12 @@ def _build_candidate_meta_map(
 
     for pos in positions:
         existing = meta_map.get(pos.code)
-        strategy = _clean_text(pos.strategy)
         meta_map[pos.code] = CandidateMeta(
             code=pos.code,
             name=pos.name or pos.code,
-            tag=(existing.tag if existing and existing.tag else strategy),
-            track=(existing.track if existing and existing.track else _infer_track_from_text(strategy)),
-            stage=(existing.stage if existing and existing.stage else _infer_stage_from_text(strategy)),
+            tag=(existing.tag if existing and existing.tag else "持仓"),
+            track=(existing.track if existing and existing.track else None),
+            stage=(existing.stage if existing and existing.stage else None),
             source_type="holding",
         )
 
@@ -969,7 +967,6 @@ def _build_portfolio_from_dict(data: dict) -> PortfolioState:
                 cost=float(item.get("cost", 0.0) or 0.0),
                 buy_dt=str(item.get("buy_dt", "")).strip(),
                 shares=int(item.get("shares", 0) or 0),
-                strategy=str(item.get("strategy", "")).strip(),
                 stop_loss=float(item.get("stop_loss")) if item.get("stop_loss") is not None else None,
             )
         )
@@ -998,7 +995,6 @@ def _portfolio_state_signature_from_state(portfolio: PortfolioState) -> str:
                 "shares": p.shares,
                 "cost_price": p.cost,
                 "buy_dt": p.buy_dt,
-                "strategy": p.strategy,
             }
             for p in portfolio.positions
         ],
@@ -1168,7 +1164,6 @@ def _process_one_position(
             f"- 持仓股数: {pos.shares}\n"
             f"- 持仓交易日: {(hold_trade_days if hold_trade_days is not None else '-')}\n"
             f"- 买入日期: {pos.buy_dt or '-'}\n"
-            f"- 原始策略: {pos.strategy or '-'}\n"
         )
         # 持仓健康诊断：复用 Wyckoff 引擎检测 L2 通道、退出信号、阶段等
         try:
@@ -1181,7 +1176,7 @@ def _process_one_position(
             payload = generate_stock_payload(
                 stock_code=pos.code,
                 stock_name=pos.name,
-                wyckoff_tag=pos.strategy or "持仓",
+                wyckoff_tag="持仓",
                 df=df_qfq,
                 track=diag.track if diag.track != "Unknown" else None,
                 stage=diag.accum_stage,
@@ -1194,7 +1189,7 @@ def _process_one_position(
             payload = generate_stock_payload(
                 stock_code=pos.code,
                 stock_name=pos.name,
-                wyckoff_tag=pos.strategy or "持仓",
+                wyckoff_tag="持仓",
                 df=df_qfq,
             )
         return (meta + diag_text + "\n" + payload, failure_msg, live_val, latest_close, atr14, hold_trade_days)

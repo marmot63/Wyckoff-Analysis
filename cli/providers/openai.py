@@ -44,7 +44,13 @@ class OpenAIProvider(LLMProvider):
             kwargs["tools"] = oai_tools
 
         response = self._client.chat.completions.create(**kwargs)
-        return self._parse_response(response)
+        result = self._parse_response(response)
+        if hasattr(response, "usage") and response.usage:
+            result["usage"] = {
+                "input_tokens": response.usage.prompt_tokens or 0,
+                "output_tokens": response.usage.completion_tokens or 0,
+            }
+        return result
 
     def chat_stream(
         self,
@@ -69,7 +75,14 @@ class OpenAIProvider(LLMProvider):
         input_tokens = 0
         output_tokens = 0
 
-        for chunk in self._client.chat.completions.create(**kwargs):
+        try:
+            stream = self._client.chat.completions.create(**kwargs)
+        except Exception:
+            # 某些第三方端点不支持 stream_options，去掉后重试
+            kwargs.pop("stream_options", None)
+            stream = self._client.chat.completions.create(**kwargs)
+
+        for chunk in stream:
             if not chunk.choices and chunk.usage:
                 input_tokens = chunk.usage.prompt_tokens or 0
                 output_tokens = chunk.usage.completion_tokens or 0

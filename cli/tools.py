@@ -144,6 +144,27 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "name": "update_portfolio",
+        "description": "管理用户持仓：新增、修改、删除持仓，或设置可用资金。操作后返回最新持仓状态。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "update", "remove", "set_cash"],
+                    "description": "操作类型：add（新增/加仓）、update（修改持仓信息）、remove（删除持仓）、set_cash（设置可用资金）",
+                },
+                "code": {"type": "string", "description": "6 位股票代码（add/update/remove 时必填）"},
+                "name": {"type": "string", "description": "股票名称（可选）"},
+                "shares": {"type": "integer", "description": "持仓股数"},
+                "cost_price": {"type": "number", "description": "成本价"},
+                "buy_dt": {"type": "string", "description": "买入日期（YYYYMMDD 格式）"},
+                "free_cash": {"type": "number", "description": "可用资金（set_cash 时使用）"},
+            },
+            "required": ["action"],
+        },
+    },
 ]
 
 # 工具中文显示名，用于终端展示
@@ -158,6 +179,7 @@ TOOL_DISPLAY_NAMES: dict[str, str] = {
     "generate_strategy_decision": "攻防决策",
     "get_recommendation_tracking": "战绩追踪",
     "get_signal_pending": "信号确认池",
+    "update_portfolio": "调仓操作",
 }
 
 
@@ -176,6 +198,11 @@ class ToolRegistry:
         })
         self._tools = self._register_tools()
 
+    @property
+    def state(self) -> dict:
+        """统一的 session state，__main__ 和工具共享同一份。"""
+        return self._tool_context.state
+
     def _register_tools(self) -> dict[str, callable]:
         """注册所有工具函数。"""
         from agents.chat_tools import (
@@ -189,6 +216,7 @@ class ToolRegistry:
             generate_strategy_decision,
             get_recommendation_tracking,
             get_signal_pending,
+            update_portfolio,
         )
         return {
             "search_stock_by_name": search_stock_by_name,
@@ -201,6 +229,7 @@ class ToolRegistry:
             "generate_strategy_decision": generate_strategy_decision,
             "get_recommendation_tracking": get_recommendation_tracking,
             "get_signal_pending": get_signal_pending,
+            "update_portfolio": update_portfolio,
         }
 
     def schemas(self) -> list[dict[str, Any]]:

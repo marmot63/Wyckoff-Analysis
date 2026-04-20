@@ -151,13 +151,13 @@ def _load_portfolio_context(user_id: str) -> str:
             "用户当前持仓（来自实盘组合）：",
             f"可用资金：¥{cash:,.2f}",
             "",
-            "| 代码 | 名称 | 成本 | 股数 | 策略 | 止损 |",
-            "|------|------|------|------|------|------|",
+            "| 代码 | 名称 | 成本 | 股数 | 止损 |",
+            "|------|------|------|------|------|",
         ]
         for p in positions:
             sl = f"{p['stop_loss']:.2f}" if p.get("stop_loss") is not None else "--"
             lines.append(
-                f"| {p['code']} | {p['name']} | {p['cost']:.2f} | {p['shares']} | {p.get('strategy') or '--'} | {sl} |"
+                f"| {p['code']} | {p['name']} | {p['cost']:.2f} | {p['shares']} | {sl} |"
             )
         lines.append("")
         lines.append("以上数据自动加载自用户的实盘持仓记录。对话中涉及这些股票时，你已经知道用户的成本和仓位。")
