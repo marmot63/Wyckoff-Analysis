@@ -5,16 +5,19 @@ from __future__ import annotations
 import json
 from typing import Any, Generator
 
+import httpx
 import openai
 
 from cli.providers.base import LLMProvider
+
+_TIMEOUT = httpx.Timeout(300.0, connect=60.0)
 
 
 class OpenAIProvider(LLMProvider):
     """通过 openai SDK 调用 OpenAI 模型。"""
 
     def __init__(self, api_key: str, model: str = "gpt-4o", base_url: str = ""):
-        kwargs: dict[str, Any] = {"api_key": api_key}
+        kwargs: dict[str, Any] = {"api_key": api_key, "timeout": _TIMEOUT}
         if base_url:
             kwargs["base_url"] = base_url.rstrip("/")
         self._client = openai.OpenAI(**kwargs)

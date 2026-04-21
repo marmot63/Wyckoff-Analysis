@@ -24,6 +24,40 @@ from textual.widgets.option_list import Option
 # Widget
 # ---------------------------------------------------------------------------
 
+def _estimate_tokens(messages: list[dict]) -> int:
+    """粗略估算消息列表的 token 数（中文~2字/token，英文~4字符/token）。"""
+    total = 0
+    for m in messages:
+        content = m.get("content", "")
+        if isinstance(content, str):
+            total += max(len(content) // 2, len(content.encode("utf-8")) // 3)
+        # tool_calls 参数也占 token
+        for tc in m.get("tool_calls", []):
+            args_str = json.dumps(tc.get("args", {}), ensure_ascii=False)
+            total += len(args_str) // 3
+    return total
+
+
+_COMPACTION_PROMPT = """请将以下对话历史总结为简洁的上下文摘要，保留关键信息：
+1. 用户的目标和意图
+2. 已完成的操作和结果
+3. 重要的数据发现（股票代码、价格、信号等）
+4. 未完成的任务
+
+用中文输出，控制在 500 字以内。只输出摘要，不要其他内容。"""
+
+
+def _pop_lines(log_widget, n: int) -> None:
+    """从 RichLog 底部移除 n 行 strips。"""
+    from textual.geometry import Size
+    if n > 0 and len(log_widget.lines) >= n:
+        del log_widget.lines[-n:]
+        log_widget.virtual_size = Size(
+            log_widget._widest_line_width, len(log_widget.lines)
+        )
+        log_widget.refresh()
+
+
 class ChatLog(RichLog):
     DEFAULT_CSS = """
     ChatLog {
@@ -212,6 +246,9 @@ class WyckoffTUI(App):
         else:
             self.exit()
 
+    def action_switch_model(self) -> None:
+        self._switch_model_selector()
+
     def action_list_models(self) -> None:
         self._list_models()
 
@@ -326,7 +363,7 @@ class WyckoffTUI(App):
         elif cmd == "/help":
             log.write(Text.from_markup(
                 "\n[bold]可用命令[/bold]\n"
-                "  /model   — 查看已配置模型（add/rm/default）\n"
+                "  /model   — 切换模型（list/add/rm/default）\n"
                 "  /login   — 登录\n"
                 "  /logout  — 退出登录\n"
                 "  /token   — Token 用量\n"
@@ -357,6 +394,8 @@ class WyckoffTUI(App):
         elif cmd == "/model":
             parts = raw.strip().split()
             if len(parts) == 1:
+                self._switch_model_selector()
+            elif parts[1] == "list":
                 self._list_models()
             elif parts[1] == "add":
                 self._start_model_add()
@@ -366,7 +405,7 @@ class WyckoffTUI(App):
                 self._set_default_model(parts[2])
             else:
                 log.write(Text.from_markup(
-                    "[dim]/model 用法: /model (列表) | /model add | /model rm <id> | /model default <id>[/dim]"
+                    "[dim]/model 用法: /model (切换) | /model list | /model add | /model rm <id> | /model default <id>[/dim]"
                 ))
         else:
             log.write(Text.from_markup(f"[red]未知命令: {raw}[/red]，/help 查看"))
@@ -487,13 +526,32 @@ class WyckoffTUI(App):
             inp.placeholder = "问我关于股票的任何问题... (/help 查看命令)"
             return
 
-        if callback_id == "model_provider":
+        if callback_id == "model_switch":
+            self._set_default_model(value)
+
+        elif callback_id == "model_provider":
             self._input_buf["provider"] = value
             log.write(Text.from_markup(f"  供应商: {value}"))
             log.write(Text.from_markup("  输入 API Key："))
             inp.placeholder = "API Key..."
             inp.password = True
             self._input_mode = _InputState.MODEL_KEY
+
+    def _switch_model_selector(self) -> None:
+        """弹出浮层选择器切换当前模型。"""
+        from cli.auth import load_model_configs, load_default_model_id
+        configs = load_model_configs()
+        if not configs:
+            log = self.query_one("#chat-log", ChatLog)
+            log.write(Text.from_markup("[dim]尚无模型配置，使用 /model add 添加[/dim]"))
+            return
+        default_id = load_default_model_id()
+        options = []
+        for c in configs:
+            mark = " ⭐" if c["id"] == default_id else ""
+            label = f"{c['id']} ({c.get('model', '?')}){mark}"
+            options.append((c["id"], label))
+        self._show_selector(options, "model_switch")
 
     def _start_model_add(self) -> None:
         log = self.query_one("#chat-log", ChatLog)
@@ -661,27 +719,88 @@ class WyckoffTUI(App):
         total_input = 0
         total_output = 0
         t_start = time.monotonic()
+        _recent_calls: list[tuple[str, str]] = []  # doom-loop: (name, args_hash)
 
         try:
             from cli.agent import MAX_TOOL_ROUNDS
 
+            _COMPACT_THRESHOLD = 12000  # ~12K tokens 触发压缩
+            _TAIL_KEEP = 4  # 保留最近 4 条消息原文
+
             for round_idx in range(MAX_TOOL_ROUNDS):
+                # ── Context compaction ──
+                if len(self._messages) > _TAIL_KEEP + 2 and _estimate_tokens(self._messages) > _COMPACT_THRESHOLD:
+                    _spinner_start("压缩上下文")
+                    head = self._messages[:-_TAIL_KEEP]
+                    tail = self._messages[-_TAIL_KEEP:]
+                    head_text = "\n".join(
+                        f"[{m['role']}] {m.get('content', '') or json.dumps(m.get('tool_calls', []), ensure_ascii=False)[:200]}"
+                        for m in head
+                    )
+                    try:
+                        summary_chunks = list(self._provider.chat_stream(
+                            [{"role": "user", "content": head_text}],
+                            [],
+                            _COMPACTION_PROMPT,
+                        ))
+                        summary = "".join(c.get("text", "") for c in summary_chunks if c["type"] == "text_delta")
+                        if summary:
+                            self._messages = [{"role": "user", "content": f"[对话摘要]\n{summary}"},
+                                              {"role": "assistant", "content": "好的，我已了解之前的对话上下文，请继续。"}] + tail
+                            _write(Text.from_markup(
+                                f"  [dim]📦 上下文已压缩（{len(head)}条→摘要，保留最近{_TAIL_KEEP}条）[/dim]"
+                            ))
+                    except Exception:
+                        pass  # 压缩失败不影响主流程
+                    _spinner_stop()
+
                 text_buf = ""
                 thinking_buf = ""
                 tool_calls = None
                 round_usage = {}
+                _stream_write_count = 0
+                _streaming_started = False
+                _stream_line_buf = ""
 
                 if round_idx > 0:
                     _spinner_start()
 
-                for chunk in self._provider.chat_stream(
-                    self._messages, self._tools.schemas(), self._system_prompt
-                ):
+                # ── 带重试的 streaming ──
+                _MAX_STREAM_RETRIES = 3
+                _stream = None
+                for _retry in range(_MAX_STREAM_RETRIES):
+                    try:
+                        _stream = self._provider.chat_stream(
+                            self._messages, self._tools.schemas(), self._system_prompt
+                        )
+                        break
+                    except Exception as _stream_err:
+                        from cli.providers.fallback import _is_retriable
+                        if not _is_retriable(_stream_err) or _retry == _MAX_STREAM_RETRIES - 1:
+                            raise
+                        _delay = min(2 ** (_retry + 1), 30)
+                        _write(Text.from_markup(
+                            f"  [yellow]⚡ 连接失败，{_delay}s 后重试（{_retry+1}/{_MAX_STREAM_RETRIES}）[/yellow]"
+                        ))
+                        _scroll()
+                        time.sleep(_delay)
+
+                for chunk in _stream:
                     if chunk["type"] == "thinking_delta":
                         thinking_buf += chunk["text"]
 
                     elif chunk["type"] == "text_delta":
                         text_buf += chunk["text"]
+                        _stream_line_buf += chunk["text"]
+                        if not _streaming_started:
+                            _spinner_stop()
+                            _write(Text.from_markup("  [dim]───[/dim]"))
+                            _streaming_started = True
+                        while "\n" in _stream_line_buf:
+                            line, _stream_line_buf = _stream_line_buf.split("\n", 1)
+                            _write(Text(line))
+                            _stream_write_count += 1
+                            _scroll()
 
                     elif chunk["type"] == "tool_calls":
                         tool_calls = chunk["tool_calls"]
@@ -693,6 +812,14 @@ class WyckoffTUI(App):
                         round_usage = chunk
 
                 _spinner_stop()
+
+                # 刷出流式行缓冲剩余
+                if _stream_line_buf:
+                    _write(Text(_stream_line_buf))
+                    _stream_write_count += 1
+                    _stream_line_buf = ""
+                    _scroll()
+
                 total_input += round_usage.get("input_tokens", 0)
                 total_output += round_usage.get("output_tokens", 0)
 
@@ -713,6 +840,12 @@ class WyckoffTUI(App):
 
                 # ── 工具调用 ──
                 if tool_calls:
+                    # 清掉流式阶段的部分文本（LLM 先输出文字后又调工具的情况）
+                    if _streaming_started and _stream_write_count > 0:
+                        self.call_from_thread(_pop_lines, log, _stream_write_count + 1)  # +1 for separator
+                        _stream_write_count = 0
+                        _streaming_started = False
+
                     assistant_msg: dict[str, Any] = {"role": "assistant", "tool_calls": tool_calls}
                     if text_buf:
                         assistant_msg["content"] = text_buf
@@ -723,6 +856,22 @@ class WyckoffTUI(App):
                         args = call["args"]
                         call_id = call["id"]
                         display = self._tools.display_name(name)
+
+                        # ── Doom-loop 检测 ──
+                        args_hash = hash(json.dumps(args, sort_keys=True, ensure_ascii=False))
+                        _recent_calls.append((name, args_hash))
+                        if len(_recent_calls) > 6:
+                            _recent_calls.pop(0)
+                        if _recent_calls.count((name, args_hash)) >= 3:
+                            _write(Text.from_markup(
+                                f"  [yellow]⚠ 检测到重复调用 {display}，已中止循环[/yellow]"
+                            ))
+                            self._messages.append({
+                                "role": "tool", "tool_call_id": call_id, "name": name,
+                                "content": json.dumps({"error": "doom-loop: 同参数重复调用3次，已中止"}, ensure_ascii=False),
+                            })
+                            tool_calls = None  # 跳出 tool loop, 不 continue 到下一轮
+                            break
 
                         _spinner_start(display)
 
@@ -752,12 +901,18 @@ class WyckoffTUI(App):
                             "name": name,
                             "content": json.dumps(result, ensure_ascii=False, default=str),
                         })
-                    continue
+                    if tool_calls is not None:
+                        continue
+                    # doom-loop 中止：不再继续下一轮，走到最终输出
 
-                # ── 最终输出（独立区域） ──
+                # ── 最终输出 ──
                 self._messages.append({"role": "assistant", "content": text_buf})
                 if text_buf:
-                    _write(Text.from_markup("  [dim]───[/dim]"))
+                    if _streaming_started and _stream_write_count > 0:
+                        # pop 流式纯文本，替换为 Markdown 格式
+                        self.call_from_thread(_pop_lines, log, _stream_write_count)
+                    else:
+                        _write(Text.from_markup("  [dim]───[/dim]"))
                     _write(Markdown(text_buf))
                     _scroll()
 
